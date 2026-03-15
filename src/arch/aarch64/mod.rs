@@ -1,3 +1,6 @@
 //! aarch64 NEON backends.
 //!
-//! Phase 7: NEON sorting networks and partition.
+//! NEON is mandatory on aarch64 — no runtime feature detection needed.
+
+#[allow(dead_code)]
+pub mod neon;

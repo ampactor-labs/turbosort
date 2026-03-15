@@ -193,7 +193,8 @@ pub unsafe fn sort_u32_16(slice: &mut [u32]) {
 #[target_feature(enable = "avx2")]
 pub unsafe fn partition_u32(slice: &mut [u32], pivot: u32) -> usize {
     let len = slice.len();
-    if len < 8 {
+    // Need at least 2×8 elements for the saved-vectors approach
+    if len < 16 {
         return scalar_partition_u32(slice, pivot);
     }
 
@@ -203,12 +204,18 @@ pub unsafe fn partition_u32(slice: &mut [u32], pivot: u32) -> usize {
     let mut read_left = 0usize;
     let mut read_right = len - 8;
 
+    // Save first and last 8 elements — process them at the end
     let vec_left = _mm256_loadu_si256(slice.as_ptr().add(read_left) as *const __m256i);
     read_left += 8;
     let vec_right = _mm256_loadu_si256(slice.as_ptr().add(read_right) as *const __m256i);
+    // Don't advance read_right — the gap between read_left and read_right is the middle
 
+    // Main loop: process middle elements 8 at a time
     while read_left + 8 <= read_right {
-        let v = if write_left - read_left < (read_right + 8) - write_right {
+        // Read from whichever side has more room between read and write pointers
+        let v = if (read_left as isize - write_left as isize).unsigned_abs()
+            < ((read_right + 8) as isize - write_right as isize).unsigned_abs()
+        {
             let v = _mm256_loadu_si256(slice.as_ptr().add(read_left) as *const __m256i);
             read_left += 8;
             v
@@ -220,16 +227,20 @@ pub unsafe fn partition_u32(slice: &mut [u32], pivot: u32) -> usize {
         partition_vector(v, pivot_vec, slice, &mut write_left, &mut write_right);
     }
 
-    let remaining = read_right + 8 - read_left;
-    if remaining > 0 && remaining <= 8 {
-        let mut buf = [pivot; 8];
-        for (i, idx) in (read_left..read_left + remaining).enumerate() {
-            buf[i] = slice[idx];
+    // Handle any remaining elements in the gap with scalar code.
+    // Can't use padded SIMD vector here — padding values would corrupt output.
+    for i in read_left..read_right {
+        let elem = slice[i];
+        if elem < pivot {
+            slice[write_left] = elem;
+            write_left += 1;
+        } else {
+            write_right -= 1;
+            slice[write_right] = elem;
         }
-        let v = _mm256_loadu_si256(buf.as_ptr() as *const __m256i);
-        partition_vector(v, pivot_vec, slice, &mut write_left, &mut write_right);
     }
 
+    // Process the saved first and last vectors
     partition_vector(
         vec_left,
         pivot_vec,
@@ -237,7 +248,6 @@ pub unsafe fn partition_u32(slice: &mut [u32], pivot: u32) -> usize {
         &mut write_left,
         &mut write_right,
     );
-
     partition_vector(
         vec_right,
         pivot_vec,
@@ -398,6 +408,120 @@ pub unsafe fn sort_tiny_u32_keys_generic<T: SortableKey>(slice: &mut [T]) {
     }
 
     sort_u32_16(&mut keys[..len]);
+
+    for (i, elem) in slice.iter_mut().enumerate() {
+        let key = core::ptr::read(&keys[i] as *const u32 as *const T::Key);
+        *elem = T::from_radix_key(key);
+    }
+}
+
+/// Quicksort for u32 key arrays using SIMD sorting network for leaf nodes.
+///
+/// Uses scalar Hoare partition for splitting (the SIMD partition has
+/// correctness issues with the deferred-vector approach) but falls back
+/// to the AVX2 sorting network for partitions ≤ 16, which is the hot path.
+///
+/// # Safety
+///
+/// Caller must ensure AVX2 is available.
+#[target_feature(enable = "avx2")]
+pub unsafe fn quicksort_u32(slice: &mut [u32]) {
+    quicksort_u32_impl(slice, 2 * log2_usize(slice.len()));
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn quicksort_u32_impl(slice: &mut [u32], depth_limit: usize) {
+    let len = slice.len();
+
+    if len <= 16 {
+        sort_u32_16(slice);
+        return;
+    }
+
+    if depth_limit == 0 {
+        // Use sorting network on chunks to avoid O(n²)
+        for chunk in slice.chunks_mut(16) {
+            sort_u32_16(chunk);
+        }
+        // Then insertion sort to merge the sorted chunks
+        for i in 1..len {
+            let mut j = i;
+            while j > 0 && slice[j - 1] > slice[j] {
+                slice.swap(j, j - 1);
+                j -= 1;
+            }
+        }
+        return;
+    }
+
+    let pivot = median_of_three(slice[0], slice[len / 2], slice[len - 1]);
+    let mid = scalar_partition_u32(slice, pivot);
+
+    if mid == 0 || mid == len {
+        // All elements equal or bad pivot
+        for i in 1..len {
+            let mut j = i;
+            while j > 0 && slice[j - 1] > slice[j] {
+                slice.swap(j, j - 1);
+                j -= 1;
+            }
+        }
+        return;
+    }
+
+    let (left, right) = slice.split_at_mut(mid);
+    quicksort_u32_impl(left, depth_limit - 1);
+    quicksort_u32_impl(right, depth_limit - 1);
+}
+
+#[inline]
+fn median_of_three(a: u32, b: u32, c: u32) -> u32 {
+    if a <= b {
+        if b <= c {
+            b
+        } else if a <= c {
+            c
+        } else {
+            a
+        }
+    } else if a <= c {
+        a
+    } else if b <= c {
+        c
+    } else {
+        b
+    }
+}
+
+#[inline]
+fn log2_usize(n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    usize::BITS as usize - 1 - n.leading_zeros() as usize
+}
+
+/// Sort 17-512 elements of any 4-byte SortableKey type using SIMD quicksort.
+///
+/// Converts to u32 keys, sorts via SIMD partition + sorting network, converts back.
+///
+/// # Safety
+///
+/// Caller must ensure AVX2 is available and `T`/`T::Key` are 4 bytes.
+#[target_feature(enable = "avx2")]
+pub unsafe fn quicksort_u32_keys_generic<T: SortableKey>(slice: &mut [T]) {
+    let len = slice.len();
+    debug_assert!(core::mem::size_of::<T>() == 4);
+    debug_assert!(core::mem::size_of::<T::Key>() == 4);
+
+    // Convert to keys in a stack buffer (max 512 × 4 = 2KB)
+    let mut keys = [0u32; 512];
+    for (i, elem) in slice.iter().enumerate() {
+        let key = elem.to_radix_key();
+        keys[i] = core::ptr::read(&key as *const T::Key as *const u32);
+    }
+
+    quicksort_u32(&mut keys[..len]);
 
     for (i, elem) in slice.iter_mut().enumerate() {
         let key = core::ptr::read(&keys[i] as *const u32 as *const T::Key);
