@@ -37,6 +37,9 @@ pub mod key;
 
 mod arch;
 mod dispatch;
+mod lut;
+#[cfg(feature = "parallel")]
+mod parallel;
 mod radix;
 mod small;
 mod tiny;
@@ -93,4 +96,30 @@ pub fn sort<T: SortableKey>(slice: &mut [T]) {
 #[inline]
 pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
     dispatch::sort_with_buffer(slice, buffer);
+}
+
+/// Sort a mutable slice using parallel LSD radix sort.
+///
+/// Uses rayon to distribute work across multiple cores. Falls back to
+/// single-threaded radix sort for arrays below 131K elements.
+///
+/// Requires the `parallel` feature.
+///
+/// # Examples
+///
+/// ```
+/// # #[cfg(feature = "parallel")]
+/// # {
+/// let mut data: Vec<u32> = (0..1_000_000).rev().collect();
+/// turbosort::sort_parallel(&mut data);
+/// assert_eq!(data, (0..1_000_000).collect::<Vec<u32>>());
+/// # }
+/// ```
+#[cfg(feature = "parallel")]
+#[inline]
+pub fn sort_parallel<T: SortableKey + Send + Sync>(slice: &mut [T])
+where
+    T::Key: Send + Sync,
+{
+    parallel::sort(slice);
 }
