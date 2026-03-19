@@ -3,3 +3,7 @@
 *.swo
 .env
 .DS_Store
+.claude/
+CLAUDE.md
+.env.*
+!.env.example
