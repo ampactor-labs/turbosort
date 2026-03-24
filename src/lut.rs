@@ -31,10 +31,7 @@ pub static COMPRESS_LUT: [[i32; 8]; 256] = {
                 left += 1;
             } else {
                 perm[right] = lane as i32;
-                // Avoid underflow on last iteration
-                if right > 0 {
-                    right -= 1;
-                }
+                right = right.saturating_sub(1);
             }
             lane += 1;
         }

@@ -6,5 +6,5 @@
 /// is constant across all keys — the scatter would be a no-op.
 #[inline]
 pub fn is_pass_trivial(histogram: &[usize], total: usize) -> bool {
-    histogram.iter().any(|&count| count == total)
+    histogram.contains(&total)
 }

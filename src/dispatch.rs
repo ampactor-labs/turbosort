@@ -34,7 +34,6 @@ pub fn sort<T: SortableKey>(slice: &mut [T]) {
     #[cfg(feature = "alloc")]
     {
         crate::radix::sort(slice);
-        return;
     }
 
     // no_std without alloc: fall back to quicksort
