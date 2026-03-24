@@ -265,3 +265,76 @@ proptest_sort!(prop_i32, i32);
 proptest_sort!(prop_i64, i64);
 proptest_sort!(prop_f32, f32);
 proptest_sort!(prop_f64, f64);
+
+// --- Adversarial patterns ---
+
+fn check_sorted_u32(input: Vec<u32>) {
+    let mut data = input.clone();
+    let mut expected = input;
+    reference_sort(&mut expected);
+    turbosort::sort(&mut data);
+    assert_eq!(data, expected);
+}
+
+const ADVERSARIAL_SIZES: [usize; 8] = [8, 16, 17, 100, 512, 513, 1000, 200_000];
+
+#[test]
+fn adversarial_presorted() {
+    for &n in &ADVERSARIAL_SIZES {
+        check_sorted_u32((0..n as u32).collect());
+    }
+}
+
+#[test]
+fn adversarial_reverse() {
+    for &n in &ADVERSARIAL_SIZES {
+        check_sorted_u32((0..n as u32).rev().collect());
+    }
+}
+
+#[test]
+fn adversarial_pipe_organ() {
+    for &n in &ADVERSARIAL_SIZES {
+        if n < 2 {
+            continue;
+        }
+        check_sorted_u32(
+            (0..n / 2)
+                .chain((0..n / 2).rev())
+                .map(|x| x as u32)
+                .collect(),
+        );
+    }
+}
+
+#[test]
+fn adversarial_sawtooth_8() {
+    for &n in &ADVERSARIAL_SIZES {
+        check_sorted_u32((0..n).map(|i| (i % 8) as u32).collect());
+    }
+}
+
+#[test]
+fn adversarial_sawtooth_64() {
+    for &n in &ADVERSARIAL_SIZES {
+        check_sorted_u32((0..n).map(|i| (i % 64) as u32).collect());
+    }
+}
+
+#[test]
+fn adversarial_few_unique() {
+    for &n in &ADVERSARIAL_SIZES {
+        check_sorted_u32((0..n).map(|i| (i % 4) as u32).collect());
+    }
+}
+
+#[test]
+fn adversarial_m3_killer() {
+    for &n in &ADVERSARIAL_SIZES {
+        check_sorted_u32(
+            (0..n)
+                .map(|i| if i % 2 == 0 { i as u32 } else { (n - i) as u32 })
+                .collect(),
+        );
+    }
+}
