@@ -5,3 +5,5 @@
 
 #[allow(dead_code)]
 pub mod avx2;
+#[allow(dead_code)]
+pub mod partition;

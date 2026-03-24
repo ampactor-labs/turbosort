@@ -7,7 +7,8 @@
 use core::arch::x86_64::*;
 
 use crate::key::SortableKey;
-use crate::lut::COMPRESS_LUT;
+
+use super::partition::partition_u32;
 
 // ============================================================================
 // Phase 3: Sorting Networks (n ≤ 16)
@@ -179,192 +180,6 @@ pub unsafe fn sort_u32_16(slice: &mut [u32]) {
 }
 
 // ============================================================================
-// Phase 4: SIMD Quicksort Partition
-// ============================================================================
-
-/// Partition a slice of u32 around a pivot using AVX2 vectorized comparison.
-///
-/// Returns the number of elements less than the pivot (partition point).
-/// Elements `< pivot` are on the left, elements `>= pivot` on the right.
-///
-/// # Safety
-///
-/// Caller must ensure AVX2 is available.
-#[target_feature(enable = "avx2")]
-pub unsafe fn partition_u32(slice: &mut [u32], pivot: u32) -> usize {
-    let len = slice.len();
-    // Need at least 2×8 elements for the saved-vectors approach
-    if len < 16 {
-        return scalar_partition_u32(slice, pivot);
-    }
-
-    let pivot_vec = _mm256_set1_epi32(pivot as i32);
-    let mut write_left = 0usize;
-    let mut write_right = len;
-    let mut read_left = 0usize;
-    let mut read_right = len - 8;
-
-    // Save first and last 8 elements — process them at the end
-    let vec_left = _mm256_loadu_si256(slice.as_ptr().add(read_left) as *const __m256i);
-    read_left += 8;
-    let vec_right = _mm256_loadu_si256(slice.as_ptr().add(read_right) as *const __m256i);
-    // Don't advance read_right — the gap between read_left and read_right is the middle
-
-    // Main loop: process middle elements 8 at a time
-    while read_left + 8 <= read_right {
-        // Read from whichever side has more room between read and write pointers
-        let v = if (read_left as isize - write_left as isize).unsigned_abs()
-            < ((read_right + 8) as isize - write_right as isize).unsigned_abs()
-        {
-            let v = _mm256_loadu_si256(slice.as_ptr().add(read_left) as *const __m256i);
-            read_left += 8;
-            v
-        } else {
-            read_right -= 8;
-            _mm256_loadu_si256(slice.as_ptr().add(read_right) as *const __m256i)
-        };
-
-        partition_vector(v, pivot_vec, slice, &mut write_left, &mut write_right);
-    }
-
-    // Handle any remaining elements in the gap with scalar code.
-    // Can't use padded SIMD vector here — padding values would corrupt output.
-    for i in read_left..read_right {
-        let elem = slice[i];
-        if elem < pivot {
-            slice[write_left] = elem;
-            write_left += 1;
-        } else {
-            write_right -= 1;
-            slice[write_right] = elem;
-        }
-    }
-
-    // Process the saved first and last vectors
-    partition_vector(
-        vec_left,
-        pivot_vec,
-        slice,
-        &mut write_left,
-        &mut write_right,
-    );
-    partition_vector(
-        vec_right,
-        pivot_vec,
-        slice,
-        &mut write_left,
-        &mut write_right,
-    );
-
-    write_left
-}
-
-/// Partition 8 elements from a vector into left (< pivot) and right (>= pivot).
-#[inline]
-#[target_feature(enable = "avx2")]
-unsafe fn partition_vector(
-    v: __m256i,
-    pivot: __m256i,
-    slice: &mut [u32],
-    write_left: &mut usize,
-    write_right: &mut usize,
-) {
-    // Unsigned comparison via bias trick: add i32::MIN to both, then use signed cmpgt
-    let bias = _mm256_set1_epi32(i32::MIN);
-    let v_biased = _mm256_add_epi32(v, bias);
-    let p_biased = _mm256_add_epi32(pivot, bias);
-    let cmp = _mm256_cmpgt_epi32(p_biased, v_biased);
-    let mask = _mm256_movemask_epi8(cmp);
-
-    let lane_mask = compress_byte_mask_to_lane_mask(mask);
-    let count_left = lane_mask.count_ones() as usize;
-    let count_right = 8 - count_left;
-
-    let perm = _mm256_loadu_si256(COMPRESS_LUT[lane_mask as usize].as_ptr() as *const __m256i);
-    let permuted = _mm256_permutevar8x32_epi32(v, perm);
-
-    // Store left elements contiguously
-    let ptr = slice.as_mut_ptr();
-    let mut buf = [0u32; 8];
-    _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, permuted);
-    core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr.add(*write_left), count_left);
-    *write_left += count_left;
-
-    // Store right elements at the right end
-    *write_right -= count_right;
-    core::ptr::copy_nonoverlapping(
-        buf.as_ptr().add(count_left),
-        ptr.add(*write_right),
-        count_right,
-    );
-}
-
-/// Convert a byte-granularity movemask to a lane-granularity mask.
-#[inline(always)]
-fn compress_byte_mask_to_lane_mask(byte_mask: i32) -> u8 {
-    let m = byte_mask as u32;
-    let mut lane_mask = 0u8;
-    let mut i = 0;
-    while i < 8 {
-        if m & (1 << (i * 4)) != 0 {
-            lane_mask |= 1 << i;
-        }
-        i += 1;
-    }
-    lane_mask
-}
-
-/// Scalar partition fallback for < 8 elements.
-fn scalar_partition_u32(slice: &mut [u32], pivot: u32) -> usize {
-    let mut left = 0;
-    let mut right = slice.len();
-    loop {
-        while left < right && slice[left] < pivot {
-            left += 1;
-        }
-        while left < right && slice[right - 1] >= pivot {
-            right -= 1;
-        }
-        if left >= right {
-            return left;
-        }
-        slice.swap(left, right - 1);
-        left += 1;
-        right -= 1;
-    }
-}
-
-// ============================================================================
-// Phase 5: SIMD Radix Histogram
-// ============================================================================
-
-/// Compute a histogram for one radix pass using AVX2 SIMD load + scalar scatter.
-///
-/// # Safety
-///
-/// Caller must ensure AVX2 is available.
-#[target_feature(enable = "avx2")]
-pub unsafe fn histogram_u32(keys: &[u32], pass: usize, histogram: &mut [usize; 256]) {
-    let shift = (pass * 8) as u32;
-    let chunks = keys.len() / 8;
-
-    for i in 0..chunks {
-        let v = _mm256_loadu_si256(keys.as_ptr().add(i * 8) as *const __m256i);
-        let mut buf = [0u32; 8];
-        _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, v);
-        for &val in &buf {
-            let digit = ((val >> shift) & 0xFF) as usize;
-            histogram[digit] += 1;
-        }
-    }
-
-    for i in (chunks * 8)..keys.len() {
-        let digit = ((keys[i] >> shift) & 0xFF) as usize;
-        histogram[digit] += 1;
-    }
-}
-
-// ============================================================================
 // Dispatch wrappers
 // ============================================================================
 
@@ -417,9 +232,8 @@ pub unsafe fn sort_tiny_u32_keys_generic<T: SortableKey>(slice: &mut [T]) {
 
 /// Quicksort for u32 key arrays using SIMD sorting network for leaf nodes.
 ///
-/// Uses scalar Hoare partition for splitting (the SIMD partition has
-/// correctness issues with the deferred-vector approach) but falls back
-/// to the AVX2 sorting network for partitions ≤ 16, which is the hot path.
+/// Uses AVX2 SIMD partition (Bramas neutralize strategy) for splitting and
+/// falls back to the AVX2 sorting network for partitions <= 16.
 ///
 /// # Safety
 ///
@@ -455,7 +269,7 @@ unsafe fn quicksort_u32_impl(slice: &mut [u32], depth_limit: usize) {
     }
 
     let pivot = median_of_three(slice[0], slice[len / 2], slice[len - 1]);
-    let mid = scalar_partition_u32(slice, pivot);
+    let mid = partition_u32(slice, pivot);
 
     if mid == 0 || mid == len {
         // All elements equal or bad pivot
