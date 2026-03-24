@@ -4,7 +4,7 @@
 //!
 //! # Algorithm
 //!
-//! 1. **Histogram:** Single-threaded scan (fast, memory-bandwidth bound).
+//! 1. **Histogram:** Parallel per-chunk scan (chunks are independent, read-only).
 //! 2. **Global prefix sum:** Compute per-thread scatter offsets.
 //! 3. **Parallel scatter:** Each thread writes its chunk to disjoint positions
 //!    in the output buffer (no synchronization needed).
@@ -13,6 +13,8 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+
+use rayon::prelude::*;
 
 use crate::key::{SortableKey, UnsignedKey};
 use crate::radix::{histogram, prefix_sum};
@@ -51,21 +53,23 @@ where
     let num_threads = rayon::current_num_threads().max(1);
     let chunk_size = (len + num_threads - 1) / num_threads;
 
-    // Step 1: compute per-chunk histograms (sequential — single scan, bandwidth-limited)
-    let mut chunk_hists: Vec<Vec<usize>> = Vec::with_capacity(num_threads);
-    for t in 0..num_threads {
-        let start = t * chunk_size;
-        let end = (start + chunk_size).min(len);
-        let mut hist = vec![0usize; passes * 256];
-        for i in start..end {
-            let key = slice[i].to_radix_key();
-            for pass in 0..passes {
-                let digit = key.radix_digit(pass) as usize;
-                hist[pass * 256 + digit] += 1;
+    // Step 1: compute per-chunk histograms in parallel (chunks are independent read-only)
+    let chunk_hists: Vec<Vec<usize>> = (0..num_threads)
+        .into_par_iter()
+        .map(|t| {
+            let start = t * chunk_size;
+            let end = (start + chunk_size).min(len);
+            let mut hist = vec![0usize; passes * 256];
+            for i in start..end {
+                let key = slice[i].to_radix_key();
+                for pass in 0..passes {
+                    let digit = key.radix_digit(pass) as usize;
+                    hist[pass * 256 + digit] += 1;
+                }
             }
-        }
-        chunk_hists.push(hist);
-    }
+            hist
+        })
+        .collect();
 
     // Merge into global histograms
     let mut global_hist = vec![0usize; passes * 256];

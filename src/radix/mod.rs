@@ -51,14 +51,35 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
 
     let passes = T::Key::BYTES;
 
-    // Step 1: compute all histograms in one scan directly from elements.
-    // Stack-allocated: passes * 256 entries. For u64 (8 passes): 16KB.
-    let mut histograms = [0usize; 8 * 256];
-    for elem in slice.iter() {
+    // Step 1: 4-way interleaved histogram reduces store-forwarding stalls
+    // on random-access increments. Each copy handles independent elements.
+    // Stack-allocated: 4 × passes × 256 entries. For u64 (8 passes): 64KB.
+    let mut h = [[0usize; 8 * 256]; 4];
+    let chunks = len / 4;
+    for i in 0..chunks {
+        let k0 = slice[i * 4].to_radix_key();
+        let k1 = slice[i * 4 + 1].to_radix_key();
+        let k2 = slice[i * 4 + 2].to_radix_key();
+        let k3 = slice[i * 4 + 3].to_radix_key();
+        for pass in 0..passes {
+            h[0][pass * 256 + k0.radix_digit(pass) as usize] += 1;
+            h[1][pass * 256 + k1.radix_digit(pass) as usize] += 1;
+            h[2][pass * 256 + k2.radix_digit(pass) as usize] += 1;
+            h[3][pass * 256 + k3.radix_digit(pass) as usize] += 1;
+        }
+    }
+    // Scalar tail
+    for elem in slice[chunks * 4..].iter() {
         let key = elem.to_radix_key();
         for pass in 0..passes {
-            let digit = key.radix_digit(pass) as usize;
-            histograms[pass * 256 + digit] += 1;
+            h[0][pass * 256 + key.radix_digit(pass) as usize] += 1;
+        }
+    }
+    // Merge 4 copies
+    let mut histograms = [0usize; 8 * 256];
+    for copy in &h {
+        for (g, c) in histograms.iter_mut().zip(copy.iter()) {
+            *g += c;
         }
     }
 
