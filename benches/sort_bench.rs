@@ -1,6 +1,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use voracious_radix_sort::RadixSort;
 
 fn gen_random_u32(n: usize) -> Vec<u32> {
     let mut rng = StdRng::seed_from_u64(0xDEADBEEF);
@@ -41,6 +42,13 @@ fn bench_turbosort_u32(c: &mut Criterion) {
                 criterion::BatchSize::LargeInput,
             )
         });
+        group.bench_with_input(BenchmarkId::new("voracious", size), &data, |b, data| {
+            b.iter_batched_ref(
+                || data.clone(),
+                |d| d.voracious_sort(),
+                criterion::BatchSize::LargeInput,
+            )
+        });
     }
     group.finish();
 }
@@ -61,6 +69,13 @@ fn bench_turbosort_u64(c: &mut Criterion) {
             b.iter_batched_ref(
                 || data.clone(),
                 |d| d.sort_unstable(),
+                criterion::BatchSize::LargeInput,
+            )
+        });
+        group.bench_with_input(BenchmarkId::new("voracious", size), &data, |b, data| {
+            b.iter_batched_ref(
+                || data.clone(),
+                |d| d.voracious_sort(),
                 criterion::BatchSize::LargeInput,
             )
         });
@@ -87,6 +102,13 @@ fn bench_turbosort_f32(c: &mut Criterion) {
                 criterion::BatchSize::LargeInput,
             )
         });
+        group.bench_with_input(BenchmarkId::new("voracious", size), &data, |b, data| {
+            b.iter_batched_ref(
+                || data.clone(),
+                |d| d.voracious_sort(),
+                criterion::BatchSize::LargeInput,
+            )
+        });
     }
     group.finish();
 }
@@ -107,6 +129,13 @@ fn bench_turbosort_i32(c: &mut Criterion) {
             b.iter_batched_ref(
                 || data.clone(),
                 |d| d.sort_unstable(),
+                criterion::BatchSize::LargeInput,
+            )
+        });
+        group.bench_with_input(BenchmarkId::new("voracious", size), &data, |b, data| {
+            b.iter_batched_ref(
+                || data.clone(),
+                |d| d.voracious_sort(),
                 criterion::BatchSize::LargeInput,
             )
         });

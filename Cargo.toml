@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Morgan Espitia"]
 description = "SIMD-accelerated radix sort for primitive types"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/ampactor/turbosort"
+repository = "https://github.com/ampactor-labs/turbosort"
 readme = "README.md"
 documentation = "https://docs.rs/turbosort"
 keywords = ["sort", "radix", "simd", "avx2", "performance"]
@@ -26,6 +26,7 @@ rayon = { version = "1.10", optional = true }
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.5"
 rand = "0.8"
+voracious_radix_sort = "1.2"
 
 [[bench]]
 name = "sort_bench"
