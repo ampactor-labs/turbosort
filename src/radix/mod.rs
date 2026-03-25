@@ -30,6 +30,8 @@ pub fn sort<T: SortableKey>(slice: &mut [T]) {
     if slice.len() <= 1 {
         return;
     }
+    // SAFETY: T is one of the 10 primitive numeric types (sealed by SortableKey);
+    // all-zero bytes is a valid representation for all of them.
     let mut buffer = alloc::vec![unsafe { core::mem::zeroed() }; slice.len()];
     sort_with_buffer(slice, &mut buffer);
 }

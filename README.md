@@ -52,7 +52,7 @@ All 10 primitive numeric types: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `
 | Input Size | Algorithm | Complexity |
 |-----------|-----------|------------|
 | 0–1 | no-op | — |
-| 2–16 | SIMD sorting network (AVX2/NEON) | O(n) |
+| 2–16 | SIMD sorting network (AVX2, NEON ≤8) | O(n) |
 | 17–512 | Quicksort with SIMD leaf nodes | O(n log n) |
 | 513+ | LSD radix sort | O(n) |
 | 131K+ | Parallel radix sort (rayon) | O(n/p) |

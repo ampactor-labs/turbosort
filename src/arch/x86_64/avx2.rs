@@ -219,12 +219,16 @@ pub unsafe fn sort_tiny_u32_keys_generic<T: SortableKey>(slice: &mut [T]) {
     let mut keys: [u32; 16] = [u32::MAX; 16];
     for (i, elem) in slice.iter().enumerate() {
         let key = elem.to_radix_key();
+        // SAFETY: T::Key is guaranteed to be 4 bytes (checked by debug_assert above),
+        // same as u32, so this reinterprets the key's bytes as u32 for SIMD sorting.
         keys[i] = core::ptr::read(&key as *const T::Key as *const u32);
     }
 
     sort_u32_16(&mut keys[..len]);
 
     for (i, elem) in slice.iter_mut().enumerate() {
+        // SAFETY: The sorted u32 values are valid T::Key representations (they were
+        // originally produced by to_radix_key), so reinterpreting back is sound.
         let key = core::ptr::read(&keys[i] as *const u32 as *const T::Key);
         *elem = T::from_radix_key(key);
     }
@@ -332,12 +336,16 @@ pub unsafe fn quicksort_u32_keys_generic<T: SortableKey>(slice: &mut [T]) {
     let mut keys = [0u32; 512];
     for (i, elem) in slice.iter().enumerate() {
         let key = elem.to_radix_key();
+        // SAFETY: T::Key is guaranteed to be 4 bytes (checked by debug_assert above),
+        // same as u32, so this reinterprets the key's bytes as u32 for SIMD sorting.
         keys[i] = core::ptr::read(&key as *const T::Key as *const u32);
     }
 
     quicksort_u32(&mut keys[..len]);
 
     for (i, elem) in slice.iter_mut().enumerate() {
+        // SAFETY: The sorted u32 values are valid T::Key representations (they were
+        // originally produced by to_radix_key), so reinterpreting back is sound.
         let key = core::ptr::read(&keys[i] as *const u32 as *const T::Key);
         *elem = T::from_radix_key(key);
     }

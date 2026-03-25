@@ -34,6 +34,8 @@ where
         return;
     }
 
+    // SAFETY: T is one of the 10 primitive numeric types (sealed by SortableKey);
+    // all-zero bytes is a valid representation for all of them.
     let mut buffer = vec![unsafe { core::mem::zeroed() }; slice.len()];
     sort_with_buffer(slice, &mut buffer);
 }
@@ -51,7 +53,7 @@ where
 
     let passes = T::Key::BYTES;
     let num_threads = rayon::current_num_threads().max(1);
-    let chunk_size = (len + num_threads - 1) / num_threads;
+    let chunk_size = len.div_ceil(num_threads);
 
     // Step 1: compute per-chunk histograms in parallel (chunks are independent read-only)
     let chunk_hists: Vec<Vec<usize>> = (0..num_threads)
@@ -60,8 +62,8 @@ where
             let start = t * chunk_size;
             let end = (start + chunk_size).min(len);
             let mut hist = vec![0usize; passes * 256];
-            for i in start..end {
-                let key = slice[i].to_radix_key();
+            for elem in &slice[start..end] {
+                let key = elem.to_radix_key();
                 for pass in 0..passes {
                     let digit = key.radix_digit(pass) as usize;
                     hist[pass * 256 + digit] += 1;
@@ -96,10 +98,10 @@ where
 
         let mut chunk_offsets: Vec<[usize; 256]> = Vec::with_capacity(num_threads);
         let mut running = global_offsets;
-        for t in 0..num_threads {
+        for ch in &chunk_hists {
             chunk_offsets.push(running);
             for d in 0..256 {
-                running[d] += chunk_hists[t][pass * 256 + d];
+                running[d] += ch[pass * 256 + d];
             }
         }
 
