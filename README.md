@@ -6,17 +6,30 @@ No FFI, no nightly, no unsafe trait implementations. Just fast sorting.
 
 ## Performance
 
-Sorting 10M random `u32` values:
+Benchmarked on Intel i5-6300U (2C/4T, AVX2) with random `u32` data. `cargo bench` to reproduce.
 
-| Algorithm | Time | vs std |
-|-----------|------|--------|
-| `std::sort_unstable` | 301 ms | 1.0x |
-| `turbosort::sort` | 182 ms | **1.7x** |
+### Serial (`turbosort::sort`)
 
-At 1M elements, turbosort is **3.1x faster** than std. The gap widens with array size
-as O(n) radix sort dominates O(n log n) comparison sort.
+| Size | std | turbosort | voracious | ts vs std | ts vs voracious |
+|------|-----|-----------|-----------|-----------|-----------------|
+| 16 | TBD | TBD | TBD | TBD | TBD |
+| 1M | TBD | TBD | TBD | TBD | TBD |
+| 10M | TBD | TBD | TBD | TBD | TBD |
 
-Small arrays (n ≤ 16) use AVX2 sorting networks: **1.7x faster** than std.
+The O(n) radix sort dominates O(n log n) comparison sort as arrays grow.
+At 10M the gap narrows — both algorithms become memory-bandwidth-bound.
+
+Small arrays (n ≤ 16) use AVX2 sorting networks for branch-free sorting.
+
+### Parallel (`turbosort::sort_parallel`, requires `parallel` feature)
+
+| Size | std | turbosort (serial) | turbosort (parallel) | par vs std | par vs serial |
+|------|-----|--------------------|----------------------|------------|---------------|
+| 1M | TBD | TBD | TBD | TBD | TBD |
+| 10M | TBD | TBD | TBD | TBD | TBD |
+
+`sort_parallel()` is a separate function — `sort()` is always single-threaded.
+Parallel radix sort splits histogram and scatter phases across cores (lock-free, no atomics).
 
 ## Usage
 
@@ -55,7 +68,8 @@ All 10 primitive numeric types: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `
 | 2–16 | SIMD sorting network (AVX2, NEON ≤8) | O(n) |
 | 17–512 | Quicksort with SIMD leaf nodes | O(n log n) |
 | 513+ | LSD radix sort | O(n) |
-| 131K+ | Parallel radix sort (rayon) | O(n/p) |
+
+With the `parallel` feature, `sort_parallel()` uses rayon for arrays >131K — see [Parallel](#parallel-turbosortsor_parallel-requires-parallel-feature) benchmarks above.
 
 ## Features
 
