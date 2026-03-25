@@ -55,33 +55,38 @@ where
     let num_threads = rayon::current_num_threads().max(1);
     let chunk_size = len.div_ceil(num_threads);
 
-    // Step 1: compute per-chunk histograms in parallel (chunks are independent read-only)
-    let chunk_hists: Vec<Vec<usize>> = (0..num_threads)
-        .into_par_iter()
-        .map(|t| {
-            let start = t * chunk_size;
-            let end = (start + chunk_size).min(len);
-            let mut hist = vec![0usize; passes * 256];
-            for elem in &slice[start..end] {
-                let key = elem.to_radix_key();
-                for pass in 0..passes {
-                    let digit = key.radix_digit(pass) as usize;
-                    hist[pass * 256 + digit] += 1;
+    // Step 1: compute global histograms for all passes in a single scan.
+    // Global histograms are pass-independent (digit counts don't change with
+    // reordering), so we compute them once up front like the serial version.
+    let global_hist: Vec<usize> = {
+        let chunk_hists: Vec<Vec<usize>> = (0..num_threads)
+            .into_par_iter()
+            .map(|t| {
+                let start = t * chunk_size;
+                let end = (start + chunk_size).min(len);
+                let mut hist = vec![0usize; passes * 256];
+                for elem in &slice[start..end] {
+                    let key = elem.to_radix_key();
+                    for pass in 0..passes {
+                        let digit = key.radix_digit(pass) as usize;
+                        hist[pass * 256 + digit] += 1;
+                    }
                 }
+                hist
+            })
+            .collect();
+
+        let mut global = vec![0usize; passes * 256];
+        for ch in &chunk_hists {
+            for (g, c) in global.iter_mut().zip(ch.iter()) {
+                *g += c;
             }
-            hist
-        })
-        .collect();
-
-    // Merge into global histograms
-    let mut global_hist = vec![0usize; passes * 256];
-    for ch in &chunk_hists {
-        for (g, c) in global_hist.iter_mut().zip(ch.iter()) {
-            *g += c;
         }
-    }
+        global
+    };
 
-    // Step 2-3: for each pass, compute offsets and scatter in parallel
+    // Step 2-3: for each pass, compute per-chunk histograms from current source,
+    // derive scatter offsets, and scatter in parallel.
     let mut in_buffer = false;
 
     for pass in 0..passes {
@@ -91,7 +96,26 @@ where
             continue;
         }
 
-        // Compute per-chunk scatter offsets
+        // Determine current source for this pass
+        let src: &[T] = if in_buffer { buffer } else { slice };
+
+        // Per-chunk histograms must be recomputed each pass because the
+        // previous scatter rearranged elements across chunks.
+        let chunk_hists: Vec<[usize; 256]> = (0..num_threads)
+            .into_par_iter()
+            .map(|t| {
+                let start = t * chunk_size;
+                let end = (start + chunk_size).min(len);
+                let mut hist = [0usize; 256];
+                for elem in &src[start..end] {
+                    let digit = elem.to_radix_key().radix_digit(pass) as usize;
+                    hist[digit] += 1;
+                }
+                hist
+            })
+            .collect();
+
+        // Compute per-chunk scatter offsets from global prefix sum
         let mut global_offsets = [0usize; 256];
         global_offsets.copy_from_slice(gh);
         prefix_sum::exclusive_prefix_sum(&mut global_offsets);
@@ -101,7 +125,7 @@ where
         for ch in &chunk_hists {
             chunk_offsets.push(running);
             for d in 0..256 {
-                running[d] += ch[pass * 256 + d];
+                running[d] += ch[d];
             }
         }
 
