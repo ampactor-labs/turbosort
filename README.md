@@ -2,8 +2,6 @@
 
 SIMD-accelerated radix sort for primitive types in Rust.
 
-No FFI, no nightly, no unsafe trait implementations. Just fast sorting.
-
 ## Performance
 
 Benchmarked on Intel i5-6300U (2C/4T, AVX2) with random `u32` data. `cargo bench` to reproduce.
