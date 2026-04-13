@@ -1,6 +1,6 @@
 # turbosort
 
-SIMD-accelerated radix sort for primitive types in pure Rust.
+SIMD-accelerated radix sort for primitive types in Rust.
 
 No FFI, no nightly, no unsafe trait implementations. Just fast sorting.
 
