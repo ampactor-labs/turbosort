@@ -1,0 +1,27 @@
+name: release
+
+# Publishes to crates.io and cuts a GitHub Release when a vX.Y.Z tag is pushed.
+# Requires a CARGO_REGISTRY_TOKEN repository secret (crates.io API token).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish || echo "crates.io publish skipped (version may already exist or token missing)"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes || echo "release already exists"

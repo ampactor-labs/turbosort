@@ -1,6 +1,6 @@
 [package]
 name = "turbosort"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Morgan Espitia"]
 description = "SIMD-accelerated radix sort for primitive types"
@@ -11,7 +11,7 @@ documentation = "https://docs.rs/turbosort"
 keywords = ["sort", "radix", "simd", "avx2", "performance"]
 categories = ["algorithms", "no-std"]
 rust-version = "1.75"
-exclude = ["CLAUDE.md", ".claude/"]
+exclude = ["CLAUDE.md", ".claude/", ".github/"]
 
 [features]
 default = ["std"]

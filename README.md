@@ -1,5 +1,10 @@
 # turbosort
 
+[![Crates.io](https://img.shields.io/crates/v/turbosort.svg)](https://crates.io/crates/turbosort)
+[![Documentation](https://docs.rs/turbosort/badge.svg)](https://docs.rs/turbosort)
+[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/turbosort.svg)](#license)
+[![Downloads](https://img.shields.io/crates/d/turbosort.svg)](https://crates.io/crates/turbosort)
+
 SIMD-accelerated radix sort for primitive types in Rust.
 
 ## Performance
