@@ -1,17 +1,24 @@
 [package]
 name = "turbosort"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 authors = ["Morgan Espitia"]
 description = "SIMD-accelerated radix sort for primitive types"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ampactor-labs/turbosort"
+homepage = "https://github.com/ampactor-labs/turbosort"
 readme = "README.md"
 documentation = "https://docs.rs/turbosort"
 keywords = ["sort", "radix", "simd", "avx2", "performance"]
 categories = ["algorithms", "no-std"]
 rust-version = "1.75"
 exclude = ["CLAUDE.md", ".claude/", ".github/"]
+
+[package.metadata.docs.rs]
+# Build docs with every feature so sort_parallel is documented, and enable the
+# doc_cfg feature-badges (see the docsrs cfg in lib.rs).
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = ["std"]

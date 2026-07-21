@@ -3,12 +3,6 @@ use turbosort::SortableKey;
 
 // --- Helpers ---
 
-fn is_sorted<T: SortableKey>(slice: &[T]) -> bool {
-    slice
-        .windows(2)
-        .all(|w| w[0].to_radix_key() <= w[1].to_radix_key())
-}
-
 fn reference_sort<T: SortableKey>(data: &mut [T]) {
     data.sort_by(|a, b| a.to_radix_key().cmp(&b.to_radix_key()));
 }
@@ -107,6 +101,25 @@ fn boundary_sizes_with_buffer() {
         expected.sort();
         turbosort::sort_with_buffer(&mut data, &mut buf);
         assert_eq!(data, expected, "sort_with_buffer failed at size {size}");
+    }
+}
+
+/// `sort_with_buffer` stays on the allocation-free byte-digit path for 8-byte
+/// keys, even at sizes where `sort()` would switch to the wide-digit path.
+/// This exercises that byte-8 core at scale.
+#[test]
+fn large_u64_with_buffer() {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    let mut rng = StdRng::seed_from_u64(2024);
+    for size in [70_000usize, 200_000] {
+        let mut data: Vec<u64> = (0..size).map(|_| rng.gen()).collect();
+        let mut buf = vec![0u64; size];
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort_with_buffer(&mut data, &mut buf);
+        assert_eq!(data, expected, "sort_with_buffer u64 failed at size {size}");
     }
 }
 
@@ -325,6 +338,83 @@ fn adversarial_sawtooth_64() {
 fn adversarial_few_unique() {
     for &n in &ADVERSARIAL_SIZES {
         check_sorted_u32((0..n).map(|i| (i % 4) as u32).collect());
+    }
+}
+
+// --- Parallel path (needs n ≥ 131072 to leave the serial fallback) ---
+
+#[cfg(feature = "parallel")]
+mod parallel {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    const N: usize = 300_000;
+
+    #[test]
+    fn parallel_u32_random() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut data: Vec<u32> = (0..N).map(|_| rng.gen()).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort_parallel(&mut data);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn parallel_u64_random() {
+        // Exercises the wide-digit (2048-bin) parallel path.
+        let mut rng = StdRng::seed_from_u64(11);
+        let mut data: Vec<u64> = (0..N).map(|_| rng.gen()).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort_parallel(&mut data);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn parallel_f32_random() {
+        let mut rng = StdRng::seed_from_u64(13);
+        let mut data: Vec<f32> = (0..N).map(|_| rng.gen_range(-1e6f32..1e6)).collect();
+        let mut expected = data.clone();
+        expected.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        turbosort::sort_parallel(&mut data);
+        assert_eq!(
+            data.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|f| f.to_bits()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn parallel_few_unique() {
+        // Trivial high-digit passes get skipped; the fused histograms must
+        // hand off across the skip correctly.
+        let mut data: Vec<u32> = (0..N).map(|i| (i % 7) as u32).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort_parallel(&mut data);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn parallel_sorted_and_reverse() {
+        let mut data: Vec<u32> = (0..N as u32).collect();
+        let expected = data.clone();
+        turbosort::sort_parallel(&mut data);
+        assert_eq!(data, expected);
+
+        let mut data: Vec<u32> = (0..N as u32).rev().collect();
+        turbosort::sort_parallel(&mut data);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn parallel_u8_counting() {
+        let mut rng = StdRng::seed_from_u64(17);
+        let mut data: Vec<u8> = (0..N).map(|_| rng.gen()).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort_parallel(&mut data);
+        assert_eq!(data, expected);
     }
 }
 

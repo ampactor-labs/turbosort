@@ -28,7 +28,9 @@
 //! ```
 
 #![cfg_attr(not(feature = "std"), no_std)]
-#![warn(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![deny(missing_docs)]
+#![warn(missing_debug_implementations)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -37,6 +39,7 @@ pub mod key;
 
 mod arch;
 mod dispatch;
+#[cfg(target_arch = "x86_64")]
 mod lut;
 #[cfg(feature = "parallel")]
 mod parallel;
@@ -50,8 +53,10 @@ pub use key::SortableKey;
 ///
 /// Automatically selects the optimal algorithm based on input size:
 /// - n ≤ 16: sorting network
-/// - 17 ≤ n ≤ 512: quicksort
-/// - n > 512: LSD radix sort (requires `alloc` feature)
+/// - 17 ≤ n ≤ 512: SIMD sorting networks up to 128 elements, then quicksort
+///   with network leaves (scalar quicksort without AVX2)
+/// - n > 512: LSD radix sort (requires `alloc` feature); already-sorted
+///   inputs are detected in one scan and returned unchanged
 ///
 /// Without the `alloc` feature, arrays > 512 elements fall back to quicksort.
 ///
@@ -116,6 +121,7 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
 /// # }
 /// ```
 #[cfg(feature = "parallel")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parallel")))]
 #[inline]
 pub fn sort_parallel<T: SortableKey + Send + Sync>(slice: &mut [T])
 where

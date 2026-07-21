@@ -12,8 +12,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # macos-latest runs on Apple Silicon, so this exercises the NEON paths
+  # natively — the 0.1.1 aarch64 panic would have been caught here.
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Format
@@ -24,3 +30,72 @@ jobs:
         run: cargo build --all-features --verbose
       - name: Test
         run: cargo test --all-features --verbose
+
+  no-std:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add embedded target
+        run: rustup target add thumbv7em-none-eabihf
+      - name: Build no_std (no alloc)
+        run: cargo build --no-default-features --target thumbv7em-none-eabihf
+      - name: Build no_std + alloc
+        run: cargo build --no-default-features --features alloc
+      - name: Clippy no_std
+        run: cargo clippy --no-default-features --target thumbv7em-none-eabihf -- -D warnings
+
+  cross-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add aarch64 target
+        run: rustup target add aarch64-unknown-linux-gnu
+      - name: Clippy aarch64
+        run: cargo clippy --all-features --target aarch64-unknown-linux-gnu -- -D warnings
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.75 --profile minimal
+      - name: Build with MSRV
+        run: cargo +1.75 build --locked --all-features
+
+  # Proves the crate packages and the packaged tarball builds — the gate that
+  # the release workflow's `cargo publish` will hit.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish dry run
+        run: cargo publish --dry-run --locked
+
+  # Builds docs the way docs.rs does, so a broken doc(cfg) or intra-doc link
+  # fails here instead of on the docs.rs build after release.
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: --cfg docsrs -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal
+      - name: Build docs (all features, docs.rs config)
+        run: cargo +nightly doc --no-deps --all-features
+
+  # Miri interprets the unsafe core (raw-pointer scatter, uninit scratch) and
+  # the NEON intrinsics cross-target. SIMD dispatch is compile-time-off under
+  # Miri on x86, so the scalar and radix paths get full coverage there.
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nightly + miri
+        run: rustup toolchain install nightly --component miri
+      - name: Miri unit tests (x86_64)
+        run: cargo +nightly miri test --lib
+      - name: Miri boundary tests (x86_64)
+        run: cargo +nightly miri test --test correctness boundary
+      - name: Miri unit tests (aarch64, NEON networks)
+        run: cargo +nightly miri test --target aarch64-unknown-linux-gnu --lib

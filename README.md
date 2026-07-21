@@ -9,60 +9,60 @@ SIMD-accelerated radix sort for primitive types in Rust.
 
 ## Performance
 
-Benchmarked on an Intel i7-8665U (4C/8T, AVX2) with random data, full-sample criterion runs. Large arrays carry roughly ±15% run-to-run variance from thermal throttling on this 15W chip, so the speedup ratios are steadier than the absolute times. Run `cargo bench` (add `--features parallel` for the parallel benchmarks) to reproduce.
+Benchmarked on an Intel i7-8665U (4C/8T, AVX2) with random data; one coherent criterion run at 30 samples per point, all three sorts measured back to back per size. Absolute times swing with this 15W chip's thermal state; the within-run ratios are the stable signal. Run `cargo bench` (add `--features parallel` for the parallel benchmarks) to reproduce.
 
-### Serial — `u32`
-
-| Size | std | turbosort | voracious | ts vs std | ts vs voracious |
-|------|-----|-----------|-----------|-----------|-----------------|
-| 16 | 39.6 ns | 34.1 ns | 36.8 ns | 1.16x | 1.08x |
-| 128 | 739 ns | 1072 ns | 695 ns | 0.69x | 0.65x |
-| 512 | 3.90 µs | 5.85 µs | 7.56 µs | 0.67x | 0.77x |
-| 4K | 42.0 µs | 30.5 µs | 33.2 µs | 1.38x | 1.09x |
-| 64K | 1090 µs | 485 µs | 556 µs | 2.25x | 1.15x |
-| 1M | 19.2 ms | 8.49 ms | 12.6 ms | 2.26x | 1.48x |
-| 10M | 221 ms | 92.4 ms | 129 ms | 2.39x | 1.40x |
-
-The algorithm dispatch table (see below) explains the mid-range dip: sizes 128–512 fall in the quicksort + SIMD-leaf tier, where `std::sort_unstable` still wins because its branch predictor warms up quickly on sorted sub-runs. Once arrays exceed ~4K elements the LSD radix pass takes over and turbosort pulls ahead, reaching **2.4x over `std`** and **1.4x over voracious** at 10M. Small arrays (n ≤ 16) sort through branch-free AVX2 sorting networks.
-
-### Serial — `u64`
+### Serial: `u32`
 
 | Size | std | turbosort | voracious | ts vs std | ts vs voracious |
 |------|-----|-----------|-----------|-----------|-----------------|
-| 128 | 736 ns | 712 ns | 738 ns | 1.03x | 1.04x |
-| 4K | 42.4 µs | 69.7 µs | 38.7 µs | 0.61x | 0.56x |
-| 1M | 20.5 ms | 22.9 ms | 16.6 ms | 0.90x | 0.73x |
+| 16 | 66.6 ns | 47.1 ns | 87.3 ns | 1.42x | 1.86x |
+| 128 | 899 ns | 388 ns | 999 ns | 2.32x | 2.58x |
+| 512 | 4.76 µs | 3.50 µs | 7.72 µs | 1.36x | 2.20x |
+| 4K | 42.8 µs | 26.7 µs | 35.4 µs | 1.61x | 1.33x |
+| 64K | 1.28 ms | 496 µs | 622 µs | 2.58x | 1.25x |
+| 1M | 21.8 ms | 8.84 ms | 15.98 ms | 2.47x | 1.81x |
+| 10M | 249 ms | 105 ms | 162 ms | 2.38x | 1.55x |
 
-`u64` is a 2-pass radix sort (two 32-bit halves). At 4K–1M the double-scatter cost shows: turbosort trails `std` by ~10% and voracious (which uses a wider radix for 64-bit keys) by ~37%. If you sort large volumes of `u64`, prefer voracious or `std::sort_unstable`.
+Sizes 17–128 sort entirely in AVX2 registers through padded bitonic networks (tiers of 32/64/128), and 129–512 runs quicksort with those networks as leaves; this tier lost to `std` by ~35% in 0.1.x and now wins it by 1.4–2.3x. Above 512 the LSD radix path takes over, with per-type histograms sized to the actual pass count and a scratch buffer that is never zeroed. Already-sorted input is detected in one scan and returned untouched.
 
-### Serial — `f32`
-
-| Size | std | turbosort | voracious | ts vs std | ts vs voracious |
-|------|-----|-----------|-----------|-----------|-----------------|
-| 128 | 1150 ns | 1175 ns | 1206 ns | 0.98x | 1.03x |
-| 4K | 67.5 µs | 42.6 µs | 52.7 µs | 1.58x | 1.24x |
-| 1M | 28.3 ms | 9.80 ms | 12.5 ms | 2.89x | 1.27x |
-
-Floats require a sign-flip step (IEEE 754 negative numbers sort backwards in bit-order), but turbosort absorbs that into the radix pass. The result is a strong win: **2.9x over `std`** at 1M.
-
-### Serial — `i32`
+### Serial: `u64`
 
 | Size | std | turbosort | voracious | ts vs std | ts vs voracious |
 |------|-----|-----------|-----------|-----------|-----------------|
-| 128 | 814 ns | 1104 ns | 887 ns | 0.74x | 0.80x |
-| 4K | 44.4 µs | 30.9 µs | 55.4 µs | 1.44x | 1.79x |
-| 1M | 19.5 ms | 7.67 ms | 12.1 ms | 2.55x | 1.57x |
+| 128 | 869 ns | 1.04 µs | 868 ns | 0.84x | 0.84x |
+| 4K | 51.3 µs | 71.9 µs | 43.0 µs | 0.71x | 0.60x |
+| 1M | 23.1 ms | 29.9 ms | 20.0 ms | 0.77x | 0.67x |
 
-Signed integers use a bias step to remap the sign bit before radix sorting. At 1M elements turbosort reaches **2.55x over `std`** and **1.57x over voracious**.
+`u64` is the honest weak spot. Random 64-bit keys force eight byte passes; above 64K elements turbosort switches to 11-bit digits (six passes, measured faster than both 8-bit and 16-bit variants), which cut 1M-element time by 1.4x over the byte path, but voracious's diverting MSD strategy touches memory roughly half as much and still wins. If your workload is dominated by large arrays of random `u64`/`i64`/`f64`, use voracious. Keys with dead high bytes (timestamps, small IDs) are a different story: constant-digit passes are skipped outright, so real-world `u64` often runs in two or three passes.
+
+### Serial: `f32`
+
+| Size | std | turbosort | voracious | ts vs std | ts vs voracious |
+|------|-----|-----------|-----------|-----------|-----------------|
+| 128 | 1.48 µs | 485 ns | 1.40 µs | 3.05x | 2.88x |
+| 4K | 81.1 µs | 42.4 µs | 63.9 µs | 1.91x | 1.51x |
+| 1M | 34.8 ms | 10.8 ms | 15.5 ms | 3.23x | 1.44x |
+
+Floats map to unsigned keys through the IEEE 754 bit trick (negative values flip entirely, positive values flip the sign bit), so they ride the same integer networks and radix passes: **3.2x over `std`** at 1M.
+
+### Serial: `i32`
+
+| Size | std | turbosort | voracious | ts vs std | ts vs voracious |
+|------|-----|-----------|-----------|-----------|-----------------|
+| 128 | 942 ns | 361 ns | 1.02 µs | 2.61x | 2.83x |
+| 4K | 55.4 µs | 31.1 µs | 71.4 µs | 1.78x | 2.29x |
+| 1M | 22.8 ms | 9.19 ms | 12.7 ms | 2.48x | 1.38x |
+
+Signed integers XOR the sign bit into unsigned key order: one instruction, absorbed into the key transform.
 
 ### Parallel (`turbosort::sort_parallel`, requires `parallel` feature)
 
 | Size | std | turbosort (serial) | turbosort (parallel) | par vs std | par vs serial |
 |------|-----|--------------------|----------------------|------------|---------------|
-| 1M | 18.0 ms | 7.53 ms | 7.18 ms | 2.51x | 1.05x |
-| 10M | 225 ms | 87.1 ms | 71.8 ms | 3.13x | 1.21x |
+| 1M | 23.5 ms | 8.60 ms | 8.36 ms | 2.81x | 1.03x |
+| 10M | 270 ms | 116 ms | 73.4 ms | 3.67x | 1.58x |
 
-`sort()` is always single-threaded; `sort_parallel()` is the opt-in multi-core path. It splits the histogram and scatter phases across cores without locks or atomics. On these four cores the gain is real but sub-linear: about break-even at 1M (setup cost cancels the work saved), rising to **1.21x over serial** at 10M, where it reaches **3.1x over `std`**. The scatter phase is bound by memory bandwidth rather than compute, so extra cores help less than they would for a CPU-heavy workload.
+`sort()` is always single-threaded; `sort_parallel()` is the opt-in multi-core path. It histograms every pass in one parallel scan up front (reused directly for the first scatter), then scatters chunks to disjoint destination ranges without locks or atomics. At 1M the setup cost still cancels the gain; at 10M it reaches **1.58x over serial** and **3.7x over `std`** on these four cores. The scatter is memory-bandwidth-bound, so scaling stays sub-linear. A fused variant that computed next-pass histograms during the scatter benchmarked slower, because the accumulation competed with the scatter for cache. It was dropped; the module docs record the measurement so it is not retried blindly.
 
 ## Usage
 
@@ -98,20 +98,27 @@ All 10 primitive numeric types: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `
 | Input Size | Algorithm | Complexity |
 |-----------|-----------|------------|
 | 0-1 | no-op | O(1) |
-| 2-16 | SIMD sorting network (AVX2; NEON ≤8) | O(n) |
-| 17-512 | Quicksort with SIMD leaf nodes | O(n log n) |
+| 2-16 | SIMD sorting network (AVX2 and NEON) | O(n) |
+| 17-128 | Padded bitonic network in registers (AVX2) | O(n log²n) |
+| 129-512 | Quicksort with SIMD partition, network leaves | O(n log n) |
 | 513+ | LSD radix sort | O(n) |
 
-With the `parallel` feature, `sort_parallel()` hands arrays larger than 131K to rayon. See the parallel benchmarks above.
+Details that cut across the tiers:
+
+- Radix inputs get a one-scan sorted check first; sorted data returns in O(n).
+- `u8`/`i8` above 512 elements use a plain counting sort with no scratch buffer.
+- 8-byte keys (`u64`/`i64`/`f64`) at 64K+ elements use 11-bit digits (six passes) instead of eight byte passes.
+- Passes where every key shares the same digit are skipped, so keys with constant high bytes pay only for the bytes that vary.
+- With the `parallel` feature, `sort_parallel()` hands arrays larger than 131K to rayon.
 
 ## Features
 
 ```toml
 [dependencies]
-turbosort = "0.1"
+turbosort = "0.2"
 
 # For parallel sorting:
-turbosort = { version = "0.1", features = ["parallel"] }
+turbosort = { version = "0.2", features = ["parallel"] }
 ```
 
 | Feature | Default | Description |
@@ -126,12 +133,12 @@ For `no_std`, disable default features and call `sort_with_buffer()` with your o
 
 | Arch | SIMD | Status |
 |------|------|--------|
-| x86_64 | AVX2 | Sorting networks, quicksort leaf acceleration |
+| x86_64 | AVX2 | Networks to 128 elements, SIMD partition |
 | x86_64 | SSE4.2 | Planned |
-| aarch64 | NEON | Sorting networks (4-lane) |
+| aarch64 | NEON | Networks to 16 elements |
 | Other | none | Scalar fallback (still uses radix sort) |
 
-On x86_64, turbosort detects AVX2 at runtime via CPUID, so one binary runs on any CPU.
+On x86_64, turbosort detects AVX2 at runtime via CPUID, so one binary runs on any CPU. The NEON paths run in CI on Apple Silicon and under Miri's aarch64 interpreter; the unsafe core (raw-pointer scatter into uninitialized scratch) is Miri-checked on every push.
 
 ## License
 
