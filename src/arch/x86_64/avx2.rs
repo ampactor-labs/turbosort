@@ -180,6 +180,203 @@ pub unsafe fn sort_u32_16(slice: &mut [u32]) {
 }
 
 // ============================================================================
+// Multi-register bitonic networks (32/64/128 elements)
+//
+// Each sorted run occupies consecutive registers. Merging two adjacent runs:
+// lane-reverse the second run (register order and lanes), which makes the
+// combined span bitonic, then half-clean with min/max at register distance
+// and recurse into halves down to the single-register merge.
+// ============================================================================
+
+/// Merge a bitonic 16-element span (2 registers) into ascending order.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn merge_bitonic_2(r: &mut [__m256i; 2]) {
+    let lo = _mm256_min_epu32(r[0], r[1]);
+    let hi = _mm256_max_epu32(r[0], r[1]);
+    r[0] = lo;
+    r[1] = hi;
+    merge_within_register(&mut r[0]);
+    merge_within_register(&mut r[1]);
+}
+
+/// Merge a bitonic 32-element span (4 registers) into ascending order.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn merge_bitonic_4(r: &mut [__m256i; 4]) {
+    for i in 0..2 {
+        let lo = _mm256_min_epu32(r[i], r[i + 2]);
+        let hi = _mm256_max_epu32(r[i], r[i + 2]);
+        r[i] = lo;
+        r[i + 2] = hi;
+    }
+    let mut a = [r[0], r[1]];
+    let mut b = [r[2], r[3]];
+    merge_bitonic_2(&mut a);
+    merge_bitonic_2(&mut b);
+    *r = [a[0], a[1], b[0], b[1]];
+}
+
+/// Merge a bitonic 64-element span (8 registers) into ascending order.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn merge_bitonic_8(r: &mut [__m256i; 8]) {
+    for i in 0..4 {
+        let lo = _mm256_min_epu32(r[i], r[i + 4]);
+        let hi = _mm256_max_epu32(r[i], r[i + 4]);
+        r[i] = lo;
+        r[i + 4] = hi;
+    }
+    let mut a = [r[0], r[1], r[2], r[3]];
+    let mut b = [r[4], r[5], r[6], r[7]];
+    merge_bitonic_4(&mut a);
+    merge_bitonic_4(&mut b);
+    *r = [a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]];
+}
+
+/// Reverse a sorted run of `K` registers in place: lane-reverse each register
+/// and reverse the register order.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn reverse_run<const K: usize>(run: &mut [__m256i; K]) {
+    for i in 0..K / 2 {
+        let a = reverse_u32(run[i]);
+        run[i] = reverse_u32(run[K - 1 - i]);
+        run[K - 1 - i] = a;
+    }
+    if K % 2 == 1 {
+        run[K / 2] = reverse_u32(run[K / 2]);
+    }
+}
+
+/// Sort 4 registers (32 elements): sort each, merge pairs, merge the halves.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn sort_4regs(r: &mut [__m256i; 4]) {
+    for reg in r.iter_mut() {
+        *reg = sort_network_8(*reg);
+    }
+    let (mut r0, mut r1, mut r2, mut r3) = (r[0], r[1], r[2], r[3]);
+    bitonic_merge_8x2(&mut r0, &mut r1);
+    bitonic_merge_8x2(&mut r2, &mut r3);
+    *r = [r0, r1, r2, r3];
+
+    // Merge the two sorted 16-runs: reverse the second, half-clean, recurse.
+    let mut hi_run = [r[2], r[3]];
+    reverse_run(&mut hi_run);
+    let mut lo = [r[0], r[1]];
+    let l0 = _mm256_min_epu32(lo[0], hi_run[0]);
+    let l1 = _mm256_min_epu32(lo[1], hi_run[1]);
+    let h0 = _mm256_max_epu32(lo[0], hi_run[0]);
+    let h1 = _mm256_max_epu32(lo[1], hi_run[1]);
+    lo = [l0, l1];
+    let mut hi = [h0, h1];
+    merge_bitonic_2(&mut lo);
+    merge_bitonic_2(&mut hi);
+    *r = [lo[0], lo[1], hi[0], hi[1]];
+}
+
+/// Sort 8 registers (64 elements).
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn sort_8regs(r: &mut [__m256i; 8]) {
+    let (a, b) = r.split_at_mut(4);
+    let a: &mut [__m256i; 4] = a.try_into().unwrap();
+    let b: &mut [__m256i; 4] = b.try_into().unwrap();
+    sort_4regs(a);
+    sort_4regs(b);
+    reverse_run(b);
+
+    let mut lo = [_mm256_setzero_si256(); 4];
+    let mut hi = [_mm256_setzero_si256(); 4];
+    for i in 0..4 {
+        lo[i] = _mm256_min_epu32(a[i], b[i]);
+        hi[i] = _mm256_max_epu32(a[i], b[i]);
+    }
+    merge_bitonic_4(&mut lo);
+    merge_bitonic_4(&mut hi);
+    *a = lo;
+    *b = hi;
+}
+
+/// Sort 16 registers (128 elements).
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn sort_16regs(r: &mut [__m256i; 16]) {
+    let (a, b) = r.split_at_mut(8);
+    let a: &mut [__m256i; 8] = a.try_into().unwrap();
+    let b: &mut [__m256i; 8] = b.try_into().unwrap();
+    sort_8regs(a);
+    sort_8regs(b);
+    reverse_run(b);
+
+    let mut lo = [_mm256_setzero_si256(); 8];
+    let mut hi = [_mm256_setzero_si256(); 8];
+    for i in 0..8 {
+        lo[i] = _mm256_min_epu32(a[i], b[i]);
+        hi[i] = _mm256_max_epu32(a[i], b[i]);
+    }
+    merge_bitonic_8(&mut lo);
+    merge_bitonic_8(&mut hi);
+    *a = lo;
+    *b = hi;
+}
+
+/// Sort up to 128 u32 elements with padded bitonic networks.
+///
+/// Pads to the next network tier (16/32/64/128) with `u32::MAX`, which sorts
+/// past every real element and is discarded on the copy back.
+///
+/// # Safety
+///
+/// Caller must ensure AVX2 is available.
+#[target_feature(enable = "avx2")]
+pub unsafe fn sort_u32_128(slice: &mut [u32]) {
+    let len = slice.len();
+    debug_assert!(len <= 128);
+
+    if len <= 16 {
+        sort_u32_16(slice);
+        return;
+    }
+
+    let mut buf = [u32::MAX; 128];
+    buf[..len].copy_from_slice(slice);
+    let p = buf.as_mut_ptr() as *mut __m256i;
+
+    if len <= 32 {
+        let mut r = [_mm256_setzero_si256(); 4];
+        for (i, reg) in r.iter_mut().enumerate() {
+            *reg = _mm256_loadu_si256(p.add(i));
+        }
+        sort_4regs(&mut r);
+        for (i, reg) in r.iter().enumerate() {
+            _mm256_storeu_si256(p.add(i), *reg);
+        }
+    } else if len <= 64 {
+        let mut r = [_mm256_setzero_si256(); 8];
+        for (i, reg) in r.iter_mut().enumerate() {
+            *reg = _mm256_loadu_si256(p.add(i));
+        }
+        sort_8regs(&mut r);
+        for (i, reg) in r.iter().enumerate() {
+            _mm256_storeu_si256(p.add(i), *reg);
+        }
+    } else {
+        let mut r = [_mm256_setzero_si256(); 16];
+        for (i, reg) in r.iter_mut().enumerate() {
+            *reg = _mm256_loadu_si256(p.add(i));
+        }
+        sort_16regs(&mut r);
+        for (i, reg) in r.iter().enumerate() {
+            _mm256_storeu_si256(p.add(i), *reg);
+        }
+    }
+
+    slice.copy_from_slice(&buf[..len]);
+}
+
+// ============================================================================
 // Dispatch wrappers
 // ============================================================================
 
@@ -251,8 +448,8 @@ pub unsafe fn quicksort_u32(slice: &mut [u32]) {
 unsafe fn quicksort_u32_impl(slice: &mut [u32], depth_limit: usize) {
     let len = slice.len();
 
-    if len <= 16 {
-        sort_u32_16(slice);
+    if len <= 128 {
+        sort_u32_128(slice);
         return;
     }
 
@@ -427,6 +624,71 @@ mod tests {
             let mut data = [8u32, 7, 6, 5, 4, 3, 2, 1];
             sort_u32_16(&mut data);
             assert_eq!(data, [1, 2, 3, 4, 5, 6, 7, 8]);
+        }
+    }
+
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn sort_128_all_lengths_random() {
+        if !is_available() {
+            return;
+        }
+        let mut state = 0x853C49E6748FEA9Bu64;
+        for n in 17..=128usize {
+            for _ in 0..20 {
+                let mut data: Vec<u32> = (0..n).map(|_| xorshift(&mut state) as u32).collect();
+                let mut expected = data.clone();
+                expected.sort_unstable();
+                unsafe { sort_u32_128(&mut data) };
+                assert_eq!(data, expected, "n={n}");
+            }
+        }
+    }
+
+    #[test]
+    fn sort_128_zero_one_patterns() {
+        // Randomized 0-1 principle sampling across every network tier.
+        if !is_available() {
+            return;
+        }
+        let mut state = 0xC0FFEE123456789u64;
+        for n in [17, 31, 32, 33, 63, 64, 65, 100, 127, 128] {
+            for _ in 0..500 {
+                let mut data: Vec<u32> =
+                    (0..n).map(|_| (xorshift(&mut state) & 1) as u32).collect();
+                let mut expected = data.clone();
+                expected.sort_unstable();
+                unsafe { sort_u32_128(&mut data) };
+                assert_eq!(data, expected, "n={n}");
+            }
+        }
+    }
+
+    #[test]
+    fn sort_128_structured_patterns() {
+        if !is_available() {
+            return;
+        }
+        for n in [17usize, 32, 33, 64, 65, 128] {
+            let cases: [Vec<u32>; 4] = [
+                (0..n as u32).collect(),
+                (0..n as u32).rev().collect(),
+                vec![7; n],
+                (0..n).map(|i| (i % 3) as u32).collect(),
+            ];
+            for case in cases {
+                let mut data = case.clone();
+                let mut expected = case;
+                expected.sort_unstable();
+                unsafe { sort_u32_128(&mut data) };
+                assert_eq!(data, expected, "n={n}");
+            }
         }
     }
 }

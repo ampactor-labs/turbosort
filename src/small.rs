@@ -1,7 +1,8 @@
-//! Quicksort for medium arrays (17 ≤ n ≤ 512).
+//! Medium arrays (17 ≤ n ≤ 512).
 //!
-//! Dispatches to SIMD-accelerated partition when available (Phase 4),
-//! falls back to scalar Hoare partition.
+//! With AVX2, sizes up to 128 go straight to padded sorting networks and
+//! larger sizes run quicksort with SIMD partition and network leaves.
+//! Falls back to scalar quicksort with Hoare partition.
 
 use crate::key::SortableKey;
 

@@ -1,6 +1,6 @@
 //! Sorting networks for very small arrays (n ≤ 16).
 //!
-//! Dispatches to SIMD sorting networks when available (Phase 3),
+//! Dispatches to SIMD sorting networks when available (AVX2 or NEON),
 //! falls back to insertion sort on scalar.
 
 use crate::key::SortableKey;

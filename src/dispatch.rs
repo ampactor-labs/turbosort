@@ -2,10 +2,12 @@
 //!
 //! Routes to the optimal algorithm based on input length:
 //! - 0-1: no-op
-//! - 2-16: sorting network ([`tiny`])
-//! - 17-512: quicksort ([`small`])
-//! - >512: radix sort (Phase 2)
-//! - >131K + `parallel` feature: parallel radix sort (Phase 6)
+//! - 2-16: sorting network ([`crate::tiny`])
+//! - 17-512: sorting networks + quicksort ([`crate::small`])
+//! - >512: LSD radix sort ([`crate::radix`])
+//!
+//! [`sort_parallel`](crate::sort_parallel) adds a parallel radix tier for
+//! arrays over 131K elements.
 
 use crate::key::SortableKey;
 
@@ -30,7 +32,6 @@ pub fn sort<T: SortableKey>(slice: &mut [T]) {
         return;
     }
 
-    // Phase 2: radix sort for large arrays
     #[cfg(feature = "alloc")]
     {
         crate::radix::sort(slice);
@@ -75,6 +76,5 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
         return;
     }
 
-    // Phase 2: radix sort with caller-provided buffer
     crate::radix::sort_with_buffer(slice, buffer);
 }
