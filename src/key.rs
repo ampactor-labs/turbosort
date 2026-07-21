@@ -30,6 +30,14 @@ pub trait UnsignedKey: Copy + Ord + private::Sealed + Sized {
     ///
     /// Pass 0 extracts the least-significant byte, pass `BYTES - 1` the most-significant.
     fn radix_digit(self, pass: usize) -> u8;
+
+    /// Extract a digit of arbitrary width: the bits at `shift..shift+width`,
+    /// where `mask == (1 << width) - 1`. `shift` must be less than the key width.
+    fn wide_digit(self, shift: u32, mask: usize) -> usize;
+
+    /// Construct a key from a single byte value. Only meaningful for one-byte
+    /// keys, where the digit is the whole key (the counting-sort path).
+    fn from_digit(digit: u8) -> Self;
 }
 
 /// Trait mapping a sortable primitive to its unsigned radix key.
@@ -73,6 +81,18 @@ macro_rules! impl_unsigned_key {
                 #[inline(always)]
                 fn radix_digit(self, pass: usize) -> u8 {
                     (self >> (pass * 8)) as u8
+                }
+
+                #[inline(always)]
+                fn wide_digit(self, shift: u32, mask: usize) -> usize {
+                    // The digit occupies the low bits after the shift, so the
+                    // usize truncation on 32-bit targets cannot lose digit bits.
+                    ((self >> shift) as usize) & mask
+                }
+
+                #[inline(always)]
+                fn from_digit(digit: u8) -> Self {
+                    digit as $ty
                 }
             }
         )*
