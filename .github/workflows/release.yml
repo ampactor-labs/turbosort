@@ -17,11 +17,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # A tag that disagrees with the manifest would publish the wrong
+      # version; refuse before touching the registry.
+      - name: Check tag matches Cargo.toml version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}" >&2
+            exit 1
+          fi
+      # Re-running the workflow for an already-published tag skips the upload
+      # explicitly; any real publish failure (bad token, broken package) fails
+      # the job instead of hiding behind an || echo.
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish || echo "crates.io publish skipped (version may already exist or token missing)"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if curl -fsSL -A "turbosort-release-workflow" \
+              "https://crates.io/api/v1/crates/turbosort/${version}" >/dev/null 2>&1; then
+            echo "turbosort ${version} already on crates.io; skipping upload"
+          else
+            cargo publish --locked
+          fi
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes || echo "release already exists"
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 ||
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
