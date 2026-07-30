@@ -4,6 +4,20 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-29
+
+### Added
+- `examples/profile.rs`, a perf/flamegraph workload with size, type, and
+  algorithm arguments, plus a `profiling` build profile (release codegen with
+  debug info). Frame-pointer builds are the documented recipe; dwarf
+  unwinding loses the AVX2 hot loops under `perf script`.
+- README "Profiling" section with the measured story: 73% of cycles in the
+  scatter passes and 22% in histograms; ~3x over `std::sort_unstable` at 100M
+  random `u32` (no large-N cliff); 88% of LLC misses in the scatter pass; dTLB
+  misses under 0.007/key at every size because the 256 scatter destination
+  streams keep the hot page set small. Flamegraph committed at
+  `docs/flamegraph.svg`, excluded from the published package.
+
 ## [0.2.0] - 2026-07-23
 
 ### Fixed
@@ -73,6 +87,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - AVX2 sorting networks for tiny inputs, quicksort + SIMD leaf for mid-range
   arrays, and LSD radix for large arrays.
 
+[0.2.1]: https://github.com/ampactor-labs/turbosort/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ampactor-labs/turbosort/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ampactor-labs/turbosort/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ampactor-labs/turbosort/releases/tag/v0.1.0

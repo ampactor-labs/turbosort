@@ -1,6 +1,6 @@
 [package]
 name = "turbosort"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Morgan Espitia"]
 description = "SIMD-accelerated radix sort for primitive types"
@@ -12,7 +12,12 @@ documentation = "https://docs.rs/turbosort"
 keywords = ["sort", "radix", "simd", "avx2", "performance"]
 categories = ["algorithms", "no-std"]
 rust-version = "1.75"
-exclude = ["CLAUDE.md", ".claude/", ".github/"]
+exclude = ["CLAUDE.md", ".claude/", ".github/", "docs/"]
+
+# Release codegen plus debug info, for perf/flamegraph runs (see examples/profile.rs).
+[profile.profiling]
+inherits = "release"
+debug = true
 
 [package.metadata.docs.rs]
 # Build docs with every feature so sort_parallel is documented, and enable the

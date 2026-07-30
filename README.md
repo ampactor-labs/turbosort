@@ -64,6 +64,37 @@ Signed integers XOR the sign bit into unsigned key order: one instruction, absor
 
 `sort()` is always single-threaded; `sort_parallel()` is the opt-in multi-core path. It histograms every pass in one parallel scan up front (reused directly for the first scatter), then scatters chunks to disjoint destination ranges without locks or atomics. At 1M the setup cost still cancels the gain; at 10M it reaches **1.58x over serial** and **3.7x over `std`** on these four cores. The scatter is memory-bandwidth-bound, so scaling stays sub-linear. A fused variant that computed next-pass histograms during the scatter benchmarked slower, because the accumulation competed with the scatter for cache. It was dropped; the module docs record the measurement so it is not retried blindly.
 
+## Profiling
+
+Where the cycles and cache misses actually go, measured with Linux `perf` on the same i7-8665U. Reproduce with:
+
+```sh
+RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling --example profile
+perf record --call-graph fp -F 997 -e cycles:u -- target/profiling/examples/profile
+perf script --inline | inferno-collapse-perf | inferno-flamegraph > docs/flamegraph.svg
+```
+
+[![Flamegraph of the default profiling workload](https://raw.githubusercontent.com/ampactor-labs/turbosort/master/docs/flamegraph.svg)](https://github.com/ampactor-labs/turbosort/blob/master/docs/flamegraph.svg)
+
+On the default workload (thirty 10M-element sorts each of random `u32` and `f32`), the scatter passes take 73% of cycles and the histogram scans 22%; the rest is the harness's per-iteration clone (3%) plus startup. The sorted-input check never registers, since on random data it abandons within the first few elements.
+
+The cache story, from a `perf stat` sweep of `examples/profile` (mean of 30/10/3 back-to-back sorts per size, so absolute times differ slightly from the criterion tables above; the ratios agree). Counters cover the whole process, including data generation and the per-iteration clone, identically for both sorts. Per-key counters do not depend on clock speed, which makes them the stable metric on a 15W chip:
+
+| Random `u32` | 1M | 10M | 100M |
+|---|---|---|---|
+| turbosort | 5.6 ms | 84 ms | 0.80 s |
+| `std::sort_unstable` | 15.7 ms | 188 ms | 2.53 s |
+| speedup | 2.8x | 2.2x | 3.2x |
+| turbosort LLC misses/key | 0.32 | 0.95 | 0.99 |
+| turbosort instructions/key | 53 | 55 | 61 |
+| `std` instructions/key | 180 | 210 | 245 |
+| turbosort IPC | 2.1 | 1.9 | 1.9 |
+| `std` IPC | 2.9 | 2.8 | 2.8 |
+
+Two regimes. At 1M keys the 8MB working set (data plus scratch) half-fits this chip's 8MB L3, so only a third of keys miss. From 10M up every key costs one LLC miss and the sort runs against memory, IPC pinned near 1.9. `std`'s pdqsort is the mirror image: compute-bound at IPC 2.8, with a per-key instruction count that grows with log n (180 to 245 from 1M to 100M) while radix stays flat near 55. That is why the gap widens to ~3x at 100M keys; rerunning the pair in the opposite order gives 2.97x, so it is not a thermal artifact. There is no large-N cliff: the ratio is at its best at the largest size tested.
+
+Recording cache misses instead of cycles (`perf record -e cache-misses:u`, 100M keys) puts 88% of the sort's LLC misses in the scatter pass; histograms and the copy-back are sequential streams the prefetcher covers. dTLB misses stay under 0.007/key at every size with plain 4K pages, because the scatter writes 256 destination streams, each sequential, so the hot page set stays near 256 no matter how large the array grows.
+
 ## Usage
 
 ```rust
