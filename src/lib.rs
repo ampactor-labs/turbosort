@@ -129,3 +129,9 @@ where
 {
     parallel::sort(slice);
 }
+
+/// Compiles every Rust code block in the README under `cargo test`, so a
+/// drifting example fails the build instead of misleading a reader.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
