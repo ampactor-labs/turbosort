@@ -7,7 +7,14 @@
 
 SIMD-accelerated radix sort for primitive types in Rust.
 
-## Performance
+```toml
+[dependencies]
+turbosort = "0.2"
+```
+
+**Status: shipping.** SSE4.2 is unimplemented, so pre-AVX2 x86 falls back to scalar, and large random `u64` loses to voracious (see Weak spots).
+
+## Measured
 
 Benchmarked on an Intel i7-8665U (4C/8T, AVX2) with random data; one coherent criterion run at 30 samples per point, all three sorts measured back to back per size. Absolute times swing with this 15W chip's thermal state; the within-run ratios are the stable signal. Run `cargo bench` (add `--features parallel` for the parallel benchmarks) to reproduce.
 
@@ -33,7 +40,7 @@ Sizes 17–128 sort entirely in AVX2 registers through padded bitonic networks (
 | 4K | 51.3 µs | 71.9 µs | 43.0 µs | 0.71x | 0.60x |
 | 1M | 23.1 ms | 29.9 ms | 20.0 ms | 0.77x | 0.67x |
 
-`u64` is the honest weak spot. Random 64-bit keys force eight byte passes; above 64K elements turbosort switches to 11-bit digits (six passes, measured faster than both 8-bit and 16-bit variants), which cut 1M-element time by 1.4x over the byte path, but voracious's diverting MSD strategy touches memory roughly half as much and still wins. If your workload is dominated by large arrays of random `u64`/`i64`/`f64`, use voracious. Keys with dead high bytes (timestamps, small IDs) are a different story: constant-digit passes are skipped outright, so real-world `u64` often runs in two or three passes.
+`u64` is the honest weak spot; the mechanism and the recommendation are in Weak spots.
 
 ### Serial: `f32`
 
@@ -64,7 +71,7 @@ Signed integers XOR the sign bit into unsigned key order: one instruction, absor
 
 `sort()` is always single-threaded; `sort_parallel()` is the opt-in multi-core path. It histograms every pass in one parallel scan up front (reused directly for the first scatter), then scatters chunks to disjoint destination ranges without locks or atomics. At 1M the setup cost still cancels the gain; at 10M it reaches **1.58x over serial** and **3.7x over `std`** on these four cores. The scatter is memory-bandwidth-bound, so scaling stays sub-linear. A fused variant that computed next-pass histograms during the scatter benchmarked slower, because the accumulation competed with the scatter for cache. It was dropped; the module docs record the measurement so it is not retried blindly.
 
-## Profiling
+### Profiling
 
 Where the cycles and cache misses actually go, measured with Linux `perf` on the same i7-8665U. Reproduce with:
 
@@ -120,11 +127,7 @@ let mut buf = [0u64; 5];
 turbosort::sort_with_buffer(&mut data, &mut buf);
 ```
 
-## Supported types
-
-All 10 primitive numeric types: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`.
-
-## Algorithm dispatch
+## How it works
 
 | Input Size | Algorithm | Complexity |
 |-----------|-----------|------------|
@@ -141,6 +144,24 @@ Details that cut across the tiers:
 - 8-byte keys (`u64`/`i64`/`f64`) at 64K+ elements use 11-bit digits (six passes) instead of eight byte passes.
 - Passes where every key shares the same digit are skipped, so keys with constant high bytes pay only for the bytes that vary.
 - With the `parallel` feature, `sort_parallel()` hands arrays larger than 131K to rayon.
+
+## Supported types
+
+All 10 primitive numeric types: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`.
+
+## Weak spots
+
+Large random `u64`, `i64`, and `f64` are the honest loss. Random 64-bit keys force eight byte passes; above 64K elements turbosort switches to 11-bit digits (six passes, measured faster than both 8-bit and 16-bit variants), which cut 1M-element time by 1.4x over the byte path, and voracious still wins by touching memory roughly half as much with its diverting MSD strategy. At 1M `u64` it runs 0.77x against `std` and 0.67x against voracious. If your workload is dominated by large arrays of random 64-bit keys, use voracious. Keys with dead high bytes (timestamps, small IDs) are a different story: constant-digit passes are skipped outright, so real-world `u64` often runs in two or three passes.
+
+The 1M-key numbers are cache-flattered. At that size the working set half-fits this chip's 8MB L3 and only about a third of keys miss, which is why the honest floor is the 2.2x at 10M rather than the headline. Absolute times swing with a 15W laptop's thermal state; the per-key counters are the stable metric and the run-order control is in the profiling section.
+
+SSE4.2 is listed as planned and is not written, so x86 without AVX2 gets the scalar path with the radix sort on top. `sort()` is not stable and it is not comparison-based: it sorts primitive numeric slices only, which is why `std::sort_unstable` is the comparison target throughout.
+
+## Verification
+
+The unsafe core is a raw-pointer scatter into uninitialized scratch, and it runs under Miri on every push, on x86_64 and under Miri's aarch64 interpreter, so the NEON paths are checked on a machine that does not have NEON. CI also runs `cargo clippy --all-features -- -D warnings`, a `thumbv7em-none-eabihf` no-default-features build to prove the `no_std` path, an `aarch64-unknown-linux-gnu` cross build, and `cargo publish --dry-run --locked` so a packaging break fails before a release rather than during one.
+
+Correctness beyond the unit tests: proptest generates random slices and asserts the result matches `std`'s sort, and the tiny-network paths are checked with 0-1 principle tests, which is the standard argument that a sorting network correct on every binary input is correct on every input. Every Rust block in this README is compiled by `cargo test` through a doctest include, so an example that stops compiling fails the build.
 
 ## Features
 
@@ -169,7 +190,7 @@ For `no_std`, disable default features and call `sort_with_buffer()` with your o
 | aarch64 | NEON | Networks to 16 elements |
 | Other | none | Scalar fallback (still uses radix sort) |
 
-On x86_64, turbosort detects AVX2 at runtime via CPUID, so one binary runs on any CPU. The NEON paths run in CI on Apple Silicon and under Miri's aarch64 interpreter; the unsafe core (raw-pointer scatter into uninitialized scratch) is Miri-checked on every push.
+On x86_64, turbosort detects AVX2 at runtime via CPUID, so one binary runs on any CPU.
 
 ## License
 
