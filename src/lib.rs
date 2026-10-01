@@ -63,7 +63,7 @@ pub use key::SortableKey;
 ///
 /// Above 16 elements, input that is already sorted, ascending or descending,
 /// is detected in one scan and finished without sorting, and `u8`/`i8` use a
-/// counting sort from 64 elements.
+/// counting sort from 48 elements.
 ///
 /// Without the `alloc` feature, arrays over 512 elements use `core`'s
 /// unstable sort, which needs no scratch memory.

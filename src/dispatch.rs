@@ -10,7 +10,7 @@
 //!
 //! Above 16 elements, one scan first finishes input that is already sorted
 //! either way ([`crate::presorted`]). One-byte keys (`u8`, `i8`) use a
-//! counting sort from 64 elements, which needs no scratch buffer.
+//! counting sort from 48 elements, which needs no scratch buffer.
 //!
 //! [`sort_parallel`](crate::sort_parallel) adds a parallel radix tier for
 //! arrays over 131K elements.
@@ -19,8 +19,10 @@ use crate::key::{SortableKey, UnsignedKey};
 
 /// One-byte keys switch to counting sort at this length. Below it, the
 /// counting sort's fixed cost (256 counters to clear and walk) loses to the
-/// comparison sorts; above it, it wins by 1.6x at 128 and 5x at 512.
-const COUNTING_MIN: usize = 64;
+/// comparison sorts on some inputs. From it, sorting batches of distinct
+/// slices measured it at least as fast on random, few-valued and ordered
+/// bytes, 1.8x to 3x faster at 64 and 2x to 5x at 512.
+const COUNTING_MIN: usize = 48;
 
 /// Sort a slice using the best algorithm for its size.
 ///

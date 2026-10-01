@@ -105,6 +105,12 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
     unsafe { sort_raw::<T, false>(slice, buffer.as_mut_ptr()) }
 }
 
+/// Below this length, [`counting_sort`] writes its output with [`mark_runs`].
+/// With fewer keys than digits, filling each digit's run branches on counts
+/// that are zero at random and calls `memset` for one or two keys: 64 random
+/// `u8` took 2.6x longer that way. At 256 the two cost the same.
+const MARK_RUNS_MAX: usize = 256;
+
 /// Counting sort for one-byte keys: histogram, then rewrite from counts.
 ///
 /// Needs no scratch buffer, so it also serves `no_std` builds without
@@ -119,6 +125,10 @@ pub(crate) fn counting_sort<T: SortableKey>(slice: &mut [T]) {
     } else {
         histogram::compute_bytes::<T, 1, 1>(slice)
     };
+    if slice.len() < MARK_RUNS_MAX {
+        mark_runs(slice, &counts);
+        return;
+    }
     let mut i = 0;
     for (d, &count) in counts.iter().enumerate() {
         if count > 0 {
@@ -126,6 +136,28 @@ pub(crate) fn counting_sort<T: SortableKey>(slice: &mut [T]) {
             slice[i..i + count].fill(val);
             i += count;
         }
+    }
+}
+
+/// Rewrite `slice` in order from one-byte `counts`, without a branch on any
+/// count: each digit is written where its run starts (an absent digit's
+/// write lands where the next present digit overwrites it), then a running
+/// maximum carries each run's digit across the run.
+fn mark_runs<T: SortableKey>(slice: &mut [T], counts: &[usize; 256]) {
+    let len = slice.len();
+    let digit = |d: usize| T::from_radix_key(T::Key::from_digit(d as u8));
+    slice.fill(digit(0));
+    let mut start = 0;
+    for (d, &count) in counts.iter().enumerate() {
+        if start < len {
+            slice[start] = digit(d);
+        }
+        start += count;
+    }
+    let mut run = T::Key::from_digit(0);
+    for x in slice.iter_mut() {
+        run = run.max(x.to_radix_key());
+        *x = T::from_radix_key(run);
     }
 }
 
@@ -267,6 +299,33 @@ mod tests {
         expected.sort_unstable();
         counting_sort(&mut data);
         assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn counting_sort_both_outputs() {
+        // Lengths on both sides of MARK_RUNS_MAX, with digits missing at
+        // either end, between the present ones, and everywhere but one.
+        let mut state = 0x0123_4567_89AB_CDEFu64;
+        for len in [1, 2, 3, 47, 48, 200, 255, 256, 257, 1000] {
+            for case in 0..5 {
+                let mut data: Vec<i8> = (0..len)
+                    .map(|_| {
+                        let r = xorshift(&mut state);
+                        match case {
+                            0 => r as i8,
+                            1 => i8::MAX,
+                            2 => i8::MIN,
+                            3 => [i8::MIN, i8::MAX][(r & 1) as usize],
+                            _ => (r % 3) as i8 - 1,
+                        }
+                    })
+                    .collect();
+                let mut expected = data.clone();
+                expected.sort_unstable();
+                counting_sort(&mut data);
+                assert_eq!(data, expected, "len={len} case={case}");
+            }
+        }
     }
 
     #[test]

@@ -39,8 +39,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Above 16 elements, one vectorized scan finishes ascending and descending
   input before any tier runs; before, only the radix tier checked, and only
   for ascending input.
-- `u8` and `i8` use the counting sort from 64 elements instead of 513, in
-  every build, with interleaved counters from 8,192 elements.
+- `u8` and `i8` use the counting sort from 48 elements instead of 513, in
+  every build, with interleaved counters from 8,192 elements. Below 256
+  elements it writes each digit where its run starts and carries it forward
+  with a running maximum, which has no branch per digit: 64 random `u8` in
+  batches of distinct slices went from 0.70x to 1.84x `sort_unstable`.
 - Diverting LSD for wide keys: the radix sort sorts only the top digits that
   carry log2(n) + 2 bits, then one scan finishes the short runs left. Random
   `u64` went from 0.63x to 1.18x `sort_unstable` at 4K and from 0.65x to
