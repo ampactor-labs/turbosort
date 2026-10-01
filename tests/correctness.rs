@@ -123,6 +123,65 @@ fn large_u64_with_buffer() {
     }
 }
 
+/// Structured 64-bit keys at sizes where `sort` takes the 11-bit path and
+/// `sort_with_buffer` the byte path, both diverting.
+#[test]
+fn large_u64_structured() {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    let mut rng = StdRng::seed_from_u64(77);
+    for size in [70_000usize, 200_000] {
+        let shapes: [(&str, Vec<u64>); 6] = [
+            ("random", (0..size).map(|_| rng.gen()).collect()),
+            (
+                "low 40 bits",
+                (0..size).map(|_| rng.gen::<u64>() >> 24).collect(),
+            ),
+            (
+                "top bit split",
+                (0..size)
+                    .map(|_| (rng.gen::<u64>() & 1) << 63 | rng.gen::<u64>() >> 8)
+                    .collect(),
+            ),
+            (
+                "correlated top bytes",
+                (0..size)
+                    .map(|_| {
+                        let b = rng.gen::<u64>() & 0xFF;
+                        b << 56 | b << 48 | b << 40 | rng.gen::<u64>() >> 24
+                    })
+                    .collect(),
+            ),
+            (
+                "1000 distinct",
+                (0..size)
+                    .map(|_| rng.gen_range(0..1000u64) * 0x9E37_79B9_7F4A_7C15)
+                    .collect(),
+            ),
+            (
+                "heavy tail",
+                (0..size)
+                    .map(|_| (1.0 / (rng.gen::<f64>() + 1e-9)).powf(1.5) as u64)
+                    .collect(),
+            ),
+        ];
+        for (shape, data) in shapes {
+            let mut expected = data.clone();
+            expected.sort_unstable();
+
+            let mut sorted = data.clone();
+            turbosort::sort(&mut sorted);
+            assert_eq!(sorted, expected, "sort, {shape}, size {size}");
+
+            let mut sorted = data;
+            let mut buf = vec![0u64; size];
+            turbosort::sort_with_buffer(&mut sorted, &mut buf);
+            assert_eq!(sorted, expected, "sort_with_buffer, {shape}, size {size}");
+        }
+    }
+}
+
 // --- Float edge cases ---
 
 #[test]
@@ -314,6 +373,47 @@ macro_rules! proptest_sort {
             }
         }
     };
+}
+
+// Wide keys with structure the uniform strategies never produce: a varying
+// number of high bits cleared, and few distinct values. Both change how many
+// digits the radix sort diverts on.
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    #[test]
+    fn structured_u64(
+        shift in 0u32..60,
+        modulus in 1u64..2000,
+        dup in any::<bool>(),
+        mut data in proptest::collection::vec(any::<u64>(), 513..=6000),
+    ) {
+        for x in data.iter_mut() {
+            *x = if dup { *x % modulus * 0x9E37_79B9_7F4A_7C15 } else { *x >> shift };
+        }
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort(&mut data);
+        prop_assert_eq!(&data, &expected);
+    }
+
+    #[test]
+    fn structured_f64(
+        scale in 0i32..300,
+        data in proptest::collection::vec(any::<u64>(), 513..=6000),
+    ) {
+        let mut floats: Vec<f64> = data
+            .iter()
+            .map(|x| (*x as i64) as f64 * 2f64.powi(-scale))
+            .collect();
+        let mut expected = floats.clone();
+        reference_sort(&mut expected);
+        turbosort::sort(&mut floats);
+        prop_assert_eq!(
+            floats.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|f| f.to_bits()).collect::<Vec<_>>()
+        );
+    }
 }
 
 proptest_sort!(prop_u8, u8);

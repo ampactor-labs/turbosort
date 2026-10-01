@@ -47,7 +47,9 @@ pub fn compute_bytes<T: SortableKey, const PASSES: usize, const COPIES: usize>(
 /// Check if a pass can be skipped (all elements have the same digit).
 ///
 /// A pass where one bin has count == total length means that digit position
-/// is constant across all keys — the scatter would be a no-op.
+/// is constant across all keys — the scatter would be a no-op. (The serial
+/// cores read the same fact off the largest bucket, which diverting needs.)
+#[cfg(feature = "parallel")]
 #[inline]
 pub fn is_pass_trivial(histogram: &[usize], total: usize) -> bool {
     histogram.contains(&total)
