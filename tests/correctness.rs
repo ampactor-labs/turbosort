@@ -4,7 +4,7 @@ use turbosort::SortableKey;
 // --- Helpers ---
 
 fn reference_sort<T: SortableKey>(data: &mut [T]) {
-    data.sort_by(|a, b| a.to_radix_key().cmp(&b.to_radix_key()));
+    data.sort_by_key(|a| a.to_radix_key());
 }
 
 // --- Exhaustive tests for small n ---

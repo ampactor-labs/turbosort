@@ -26,6 +26,10 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${version}" >&2
             exit 1
           fi
+      # A tag can point at any commit, including one CI never ran on; refuse
+      # to publish one whose tests fail.
+      - name: Test
+        run: cargo test --release --all-features
       # Re-running the workflow for an already-published tag skips the upload
       # explicitly; any real publish failure (bad token, broken package) fails
       # the job instead of hiding behind an || echo.

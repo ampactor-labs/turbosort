@@ -103,7 +103,7 @@ fn log2_eighths(x: usize) -> u32 {
     8 * int + frac as u32
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
