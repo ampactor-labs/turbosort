@@ -171,3 +171,23 @@ cargo bench --bench sort_bench -- '^small_batches/' --sample-size 20 --warm-up-t
 | 512 | 4.58 µs | 5.22 µs | 1.90 µs | 0.84x | 2.41x |
 
 The `sort_unstable` column is from the run of the current code. Three changes account for the short lengths. The networks used to copy keys one at a time into a stack buffer and read it back with vector loads, and a vector load that overlaps several smaller stores waits for them to reach the cache; keys now go straight into registers. Depending on the type and the calling code, the compiler inlined the radix sort into `sort`, and then every call probed 40 to 48 KiB of stack for its histograms before looking at the length (0.2.1 did for `f32`; this branch did for `u32` before the fix); the radix cores are no longer inlined. And slices of 2 and 3 use insertion sort, which beats a network's fixed cost of about 7 ns there. At 512 the quicksort that 0.2.1 ran lost to `sort_unstable` on fresh inputs, although it won the single-input benchmark (1.46x above).
+
+### sort_by_key
+
+`sort_by_key` is new, so there is no 0.2.1 side; the baseline is the standard library's stable `sort_by_key`, which keeps equal keys in order as `sort_by_key` does. The `by_key` group sorts 32-byte records (a key and 24 bytes of payload) by a random key, from one run at 10 samples on the same VM:
+
+```sh
+cargo bench --bench sort_bench -- '^by_key/' --sample-size 10 --warm-up-time 1 --measurement-time 3
+```
+
+| Key | Records | Standard library | turbosort | vs standard library |
+| --- | --- | --- | --- | --- |
+| `u32` | 1,000 | 15.2 µs | 8.24 µs | 1.84x |
+| `u32` | 65,536 | 3.01 ms | 1.01 ms | 2.97x |
+| `u32` | 1M | 78.1 ms | 59.1 ms | 1.32x |
+| `u64` | 1,000 | 14.6 µs | 11.4 µs | 1.28x |
+| `u64` | 65,536 | 2.98 ms | 1.48 ms | 2.01x |
+| `u64` | 1M | 80.3 ms | 84.8 ms | 0.95x |
+
+At a million records, timing each phase in a scratch harness put 75% (`u64`) to 85% (`u32`) of the time in the radix passes over the entries and in moving the records into their new order, which write 48 to 64 MB of freshly allocated memory per call. The same harness, sorting batches of distinct record arrays, measured `u32` keys at 2.1x at a million, and found the losses the README lists: few distinct keys (0.6x for `u64` at a million), and input already sorted (0.7x) or reversed (0.5x), where the standard library finishes in one pass over the records.
+

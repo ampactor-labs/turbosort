@@ -45,9 +45,14 @@ let mut data = [42u64, 7, 99, 1, 0];
 let mut buf = [0u64; 5];
 turbosort::sort_with_buffer(&mut data, &mut buf);
 assert_eq!(data, [0, 1, 7, 42, 99]);
+
+// Any type, by a key of one of the number types. Stable: equal keys keep their order.
+let mut people = vec![("bob", 31u32), ("alice", 25), ("carol", 31), ("dave", 25)];
+turbosort::sort_by_key(&mut people, |&(_, age)| age);
+assert_eq!(people, [("alice", 25), ("dave", 25), ("bob", 31), ("carol", 31)]);
 ```
 
-`sort` allocates one scratch buffer the length of the slice when it runs the radix sort on a type wider than one byte. `sort_with_buffer` uses the caller's buffer instead and panics if that buffer is shorter than the slice. For the multi-core sort, enable the `parallel` feature and call `turbosort::sort_parallel(&mut data)`:
+`sort` allocates one scratch buffer the length of the slice when it runs the radix sort on a type wider than one byte. `sort_with_buffer` uses the caller's buffer instead and panics if that buffer is shorter than the slice. `sort_by_key` needs the `alloc` feature; from 128 elements it allocates two arrays of 8 bytes per element (16 for 8-byte keys) and room for the elements. For the multi-core sort, enable the `parallel` feature and call `turbosort::sort_parallel(&mut data)`:
 
 ```toml
 [dependencies]
@@ -93,6 +98,8 @@ The radix sort works from the least significant digit (LSD) up. Each pass distri
 - When a pass's buckets are many and nearly equal in size, as in a permutation of 0..n, the plain scatter's 256 write positions sit at the same offsets within their pages and contend for a few cache sets. Those passes stage each bucket's keys in a 64-byte line and write whole, aligned lines (`src/radix/scatter.rs`). Random keys never take this path; the 11-bit path below does not have it.
 - For 8-byte keys (`u64`, `i64`, `f64`) of 65,536 elements or more, `sort` uses 11-bit digits: six passes instead of eight. That made 1M-element `u64` 1.4x faster than the byte path in 0.2.0, and 8-, 13- and 16-bit digits were measured and lost ([CHANGELOG](CHANGELOG.md), 0.2.0). `sort_with_buffer` stays on byte digits, because the wide path allocates its histograms.
 - Wide keys divert (`src/radix/divert.rs`). When the top digits alone carry log2(n) + 2 bits, as they do for random 64-bit keys, only those digits are radix-sorted; one scan then sorts each run of keys that agree on them, by insertion sort up to 16 keys. At 1M random `u64`, `sort` runs three of its six 11-bit passes and `sort_with_buffer` three of its eight byte passes. The digit count comes from the histograms; if it is too optimistic, the runs come out longer and the scan sorts them with `sort_unstable`. Diverting only happens when it skips at least three digits, which in practice means 8-byte keys.
+
+`sort_by_key` (`src/by_key.rs`) calls the key function once per element and radix-sorts the keys together with each element's position. The passes cover only the key bytes that vary and keep equal keys in position order, which makes the sort stable, and wide keys divert as above, with each run finished by key and position. The elements are then moved into place through a buffer, so they can be any type. Sorted input returns after one scan of the keys, and reversed input is reversed with each run of equal keys put back in order. Below 128 elements it is the standard library's stable `sort_by_key`.
 
 `sort_parallel` hands slices of 131,072 elements or more to rayon and runs the serial `sort` below that (`src/parallel.rs`). Like the serial sort it counts only the digits that vary and diverts wide keys, splitting the finishing scan across threads at run boundaries; it does not combine writes. One parallel scan builds per-chunk histograms for every pass, and the first pass reuses them as its scatter offsets. Each thread then scatters its chunk into its own ranges of the destination, so no locks or atomics are needed. A fused variant that built the next pass's histograms during the scatter measured slower and was dropped; the module docs record why.
 
@@ -189,6 +196,8 @@ Those benchmarks sort one input over and over, which lets the branch predictor l
 
 Below 17 elements, 0.2.1 lost most of its time outside the network itself: it copied keys into a stack buffer one at a time and read them back with vector loads, which wait for such stores to reach the cache, and in some builds every call probed 40 KiB of stack for the radix sort's histograms. Neither happens now ([docs/BENCHMARKS.md](docs/BENCHMARKS.md#batches-of-short-slices)).
 
+`sort_by_key` has no 0.2.1 counterpart. Against the standard library's stable `sort_by_key` on 32-byte records with random keys (the `by_key` group), it ran 1.84x, 2.97x and 1.32x as fast at 1,000, 65,536 and 1M records keyed by `u32`, and 1.28x, 2.01x and 0.95x keyed by `u64` ([docs/BENCHMARKS.md](docs/BENCHMARKS.md#sort_by_key)).
+
 ## Testing
 
 ```sh
@@ -215,7 +224,8 @@ The published speedups were measured on one laptop chip, an Intel i7-8665U, for 
 - `sort_with_buffer` never allocates, so 8-byte keys stay on byte digits there. On skewed keys that cannot divert, that is up to 2x slower than `sort`'s 11-bit digits. Large 8-byte inputs use up to 64 KiB of stack for histograms, and passes that combine writes 16 KiB more.
 - 8-byte keys of 65,536 elements or more take the 11-bit path, which does not combine writes, so inputs that fill every bucket equally keep running slower than random keys there: a random permutation of 65,536 `u64` ran at 1.04x of `sort_unstable` in the `patterns` benchmark. Handing such input to the byte path paid off for pipe organs but not for permutations in measurements on the cloud VM.
 - Few distinct values whose bytes all vary (four random `u64` values repeated, say) still cost a full radix sort: 65,536 such keys ran at 0.14x of `sort_unstable` on the cloud VM, because the standard library partitions equal keys away. Small distinct values are fine, because their high bytes are constant: four distinct values in the `patterns` benchmark ran at 1.23x (`u32`) and 1.33x (`u64`).
-- It sorts the ten primitive number types only. There is no comparator or key function, so it cannot sort structs or sort by a field, and `usize`, `isize`, `u128` and `i128` are not supported.
+- `sort` takes the ten primitive number types only; `sort_by_key` sorts other types by a key of one of them. There is no comparator, and `usize`, `isize`, `u128` and `i128` are not supported, as values or as keys.
+- `sort_by_key` beats the standard library's stable `sort_by_key` on random keys up to tens of thousands of records, but on the cloud VM it ran at 0.95x for a million records with 8-byte keys, 0.6x to 0.9x on few distinct keys at some sizes, and 0.4x to 0.8x on input already sorted or reversed, which it finishes in linear time.
 - A NaN's sign bit decides where it sorts. `f32::NAN` sorts last, but on x86_64 a NaN produced by an invalid operation (`0.0 / 0.0` gives `0xffc00000`) has the sign bit set and sorts first.
 - `sort` is not a stable sort. For these types equal keys are identical bit patterns, so the order of equal elements cannot be observed.
 - The `parallel` feature depends on rayon, whose releases from 1.11 on need Rust 1.80. CI builds it on Rust 1.75 against the lockfile's rayon 1.10; on Rust 1.75 to 1.79, pin it with `cargo update -p rayon --precise 1.10.0`.

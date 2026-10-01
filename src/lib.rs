@@ -42,6 +42,8 @@ extern crate alloc;
 pub mod key;
 
 mod arch;
+#[cfg(feature = "alloc")]
+mod by_key;
 mod dispatch;
 #[cfg(feature = "parallel")]
 mod parallel;
@@ -116,6 +118,37 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
     dispatch::sort_with_buffer(slice, buffer);
 }
 
+/// Sort a slice by a key, keeping elements with equal keys in their original
+/// order (a stable sort).
+///
+/// `key` returns one of the [`SortableKey`] types, and the elements can be
+/// any type: they are only moved, never copied or cloned. From 256 elements
+/// `key` is called once per element, the keys are radix-sorted together with
+/// each element's position, and the elements are then moved into order
+/// through a buffer. Below that this is the standard library's stable
+/// `sort_by_key`, which calls `key` on every comparison.
+///
+/// Requires the `alloc` feature. From 256 elements it allocates two arrays
+/// of 8 bytes per element (16 for 8-byte keys) and room for the elements.
+///
+/// # Examples
+///
+/// ```
+/// let mut people = vec![("bob", 31u32), ("alice", 25), ("carol", 31), ("dave", 25)];
+/// turbosort::sort_by_key(&mut people, |&(_, age)| age);
+/// assert_eq!(people, [("alice", 25), ("dave", 25), ("bob", 31), ("carol", 31)]);
+/// ```
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+#[inline]
+pub fn sort_by_key<T, K, F>(slice: &mut [T], key: F)
+where
+    K: SortableKey,
+    F: FnMut(&T) -> K,
+{
+    by_key::sort_by_key(slice, key);
+}
+
 /// Sort a mutable slice using parallel LSD radix sort.
 ///
 /// Uses rayon to distribute work across multiple cores. Below 131,072
@@ -144,7 +177,8 @@ where
 }
 
 /// Compiles every Rust code block in the README under `cargo test`, so a
-/// drifting example fails the build instead of misleading a reader.
-#[cfg(doctest)]
+/// drifting example fails the build instead of misleading a reader. Only
+/// with `alloc`, which the README's `sort_by_key` example needs.
+#[cfg(all(doctest, feature = "alloc"))]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;

@@ -80,6 +80,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   radix passes are scalar; SIMD is in the small-slice networks and merges.
 
 ### Added
+- `sort_by_key`, with the `alloc` feature: a stable sort of any type by a
+  key of one of the ten number types (issue #2). The key function runs once
+  per element; the keys are radix-sorted with each element's position, and
+  the elements are moved into place, so they need not be `Copy`. 32-byte
+  records with random `u32` keys sorted 1.84x, 2.97x and 1.32x as fast as
+  the standard library's stable `sort_by_key` at 1,000, 65,536 and 1M on
+  the VM; with `u64` keys, 1.28x, 2.01x and 0.95x.
 - `no_std` builds on x86_64 use the AVX2 networks when compiled with AVX2
   enabled (`-C target-feature=+avx2` or a `target-cpu` that has it); before,
   they never did. CI runs the tests in that configuration.

@@ -478,6 +478,61 @@ proptest! {
     }
 }
 
+// Stable sorting by a key: tuples keyed by one field, against the standard
+// library's stable sort, which must agree element for element.
+#[cfg(feature = "alloc")]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    #[test]
+    fn sort_by_key_u32(
+        modulus in 1u32..5000,
+        keys in proptest::collection::vec(any::<u32>(), 0..=3000),
+    ) {
+        let mut items: Vec<(u32, usize)> = keys.iter().map(|k| k % modulus).zip(0..).collect();
+        let mut expected = items.clone();
+        expected.sort_by_key(|&(k, _)| k);
+        turbosort::sort_by_key(&mut items, |&(k, _)| k);
+        prop_assert_eq!(items, expected);
+    }
+
+    #[test]
+    fn sort_by_key_u64(
+        shift in 0u32..60,
+        modulus in 1u64..5000,
+        dup in any::<bool>(),
+        keys in proptest::collection::vec(any::<u64>(), 0..=3000),
+    ) {
+        let mut items: Vec<(u64, usize)> = keys
+            .iter()
+            .map(|&k| if dup { (k % modulus).wrapping_mul(0x9E37_79B9_7F4A_7C15) } else { k >> shift })
+            .zip(0..)
+            .collect();
+        let mut expected = items.clone();
+        expected.sort_by_key(|&(k, _)| k);
+        turbosort::sort_by_key(&mut items, |&(k, _)| k);
+        prop_assert_eq!(items, expected);
+    }
+
+    #[test]
+    fn sort_by_key_f64(
+        scale in 0i32..300,
+        modulus in 1u64..5000,
+        data in proptest::collection::vec(any::<u64>(), 0..=3000),
+    ) {
+        let mut items: Vec<(f64, usize)> = data
+            .iter()
+            .map(|&x| ((x % modulus) as i64 - (modulus / 2) as i64) as f64 * 2f64.powi(-scale))
+            .zip(0..)
+            .collect();
+        let mut expected = items.clone();
+        expected.sort_by(|a, b| a.0.total_cmp(&b.0));
+        turbosort::sort_by_key(&mut items, |&(k, _)| k);
+        let bits = |v: &[(f64, usize)]| v.iter().map(|&(k, i)| (k.to_bits(), i)).collect::<Vec<_>>();
+        prop_assert_eq!(bits(&items), bits(&expected));
+    }
+}
+
 proptest_sort!(prop_u8, u8);
 proptest_sort!(prop_u16, u16);
 proptest_sort!(prop_u32, u32);

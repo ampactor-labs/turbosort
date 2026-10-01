@@ -249,6 +249,72 @@ fn bench_small_batches(c: &mut Criterion) {
     group.finish();
 }
 
+/// A 32-byte record keyed by one field: what `sort_by_key` is for.
+#[derive(Clone, Copy)]
+struct Record<K> {
+    key: K,
+    // Never read: it makes the record 32 bytes.
+    #[allow(dead_code)]
+    payload: [u64; 3],
+}
+
+fn bench_by_key_pair<K: turbosort::SortableKey + Ord>(
+    group: &mut BenchmarkGroup<WallTime>,
+    name: &str,
+    data: &[Record<K>],
+) {
+    let size = data.len();
+    group.bench_with_input(
+        BenchmarkId::new(format!("turbosort/{name}"), size),
+        data,
+        |b, data| {
+            b.iter_batched_ref(
+                || data.to_vec(),
+                |d| turbosort::sort_by_key(d, |r| r.key),
+                criterion::BatchSize::LargeInput,
+            )
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new(format!("std_stable/{name}"), size),
+        data,
+        |b, data| {
+            b.iter_batched_ref(
+                || data.to_vec(),
+                |d| d.sort_by_key(|r| r.key),
+                criterion::BatchSize::LargeInput,
+            )
+        },
+    );
+}
+
+/// Stable sorting of records by a random key, against the standard
+/// library's stable `sort_by_key`.
+fn bench_by_key(c: &mut Criterion) {
+    let mut group = c.benchmark_group("by_key");
+    for &size in &[1_000, 65_536, 1_000_000] {
+        let keys = gen_random_u64(size);
+        let narrow: Vec<Record<u32>> = keys
+            .iter()
+            .map(|&k| Record {
+                key: k as u32,
+                payload: [k; 3],
+            })
+            .collect();
+        let wide: Vec<Record<u64>> = keys
+            .iter()
+            .map(|&k| Record {
+                key: k,
+                payload: [k; 3],
+            })
+            .collect();
+        group.throughput(Throughput::Elements(size as u64));
+        bench_by_key_pair(&mut group, "u32", &narrow);
+        bench_by_key_pair(&mut group, "u64", &wide);
+    }
+    group.finish();
+}
+
 #[cfg(feature = "parallel")]
 fn bench_parallel_u32(c: &mut Criterion) {
     let mut group = c.benchmark_group("parallel/u32");
@@ -288,6 +354,7 @@ criterion_group!(
     bench_turbosort_i32,
     bench_patterns,
     bench_small_batches,
+    bench_by_key,
 );
 
 #[cfg(feature = "parallel")]
