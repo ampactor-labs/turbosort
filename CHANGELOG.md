@@ -80,6 +80,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   radix passes are scalar; SIMD is in the small-slice networks and merges.
 
 ### Added
+- `no_std` builds on x86_64 use the AVX2 networks when compiled with AVX2
+  enabled (`-C target-feature=+avx2` or a `target-cpu` that has it); before,
+  they never did. CI runs the tests in that configuration.
 - A `patterns` benchmark group: sorted, reversed, few-unique, pipe-organ,
   sawtooth and permutation inputs for `u32` and `u64` at 512 and 65,536.
 - A `small_batches` benchmark group, which sorts many distinct short slices.

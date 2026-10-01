@@ -421,18 +421,20 @@ unsafe fn sort_u32_512(buf: &mut [u32; 512], n: usize) {
 // Dispatch wrappers
 // ============================================================================
 
-/// Check if AVX2 is available at runtime.
+/// Check if AVX2 is available.
 ///
-/// Requires `std` for CPUID detection. Returns `false` in `no_std` builds.
+/// With `std`, CPUID decides at run time. Without it, AVX2 is used only when
+/// the build enables it (`-C target-feature=+avx2`, or a `target-cpu` that
+/// has it), which promises the CPU has it.
 #[inline]
 pub fn is_available() -> bool {
-    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg(feature = "std")]
     {
         is_x86_feature_detected!("avx2")
     }
-    #[cfg(not(all(target_arch = "x86_64", feature = "std")))]
+    #[cfg(not(feature = "std"))]
     {
-        false
+        cfg!(target_feature = "avx2")
     }
 }
 

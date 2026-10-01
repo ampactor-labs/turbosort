@@ -28,8 +28,9 @@
 //! assert_eq!(data, [1, 3, 5, 8, 9]);
 //! ```
 
-// Unit tests link std in every configuration; without the `std` feature
-// AVX2 detection stays off, so those runs cover the scalar paths on x86.
+// Unit tests link std in every configuration. Without the `std` feature
+// there is no AVX2 detection, so on x86 those runs cover the scalar paths
+// unless the build enables AVX2 itself.
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(missing_docs)]

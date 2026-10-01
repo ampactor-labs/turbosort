@@ -51,6 +51,12 @@ jobs:
         run: cargo test --release --no-default-features
       - name: Test no_std + alloc
         run: cargo test --release --no-default-features --features alloc
+      # A no_std build compiled with AVX2 enabled uses the networks without
+      # detection; GitHub's x86 runners have AVX2.
+      - name: Test no_std with AVX2 enabled at compile time
+        run: cargo test --release --no-default-features
+        env:
+          RUSTFLAGS: -C target-feature=+avx2
 
   cross-aarch64:
     runs-on: ubuntu-latest
