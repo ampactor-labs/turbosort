@@ -1,6 +1,6 @@
 # Benchmarks and profiling
 
-This file holds the detail behind the Benchmarks section of the [README](../README.md): the profile of the 0.2.1 release on an Intel i7-8665U, and a check on a second machine. The criterion tables are in the README.
+This file holds the detail behind the Benchmarks section of the [README](../README.md): the profile of the 0.2.1 release on an Intel i7-8665U, a check on a second machine, and before-and-after runs for the changes since 0.2.1. The 0.2.1 criterion tables are in the README.
 
 ## Profiling
 
@@ -71,3 +71,68 @@ cargo bench --bench sort_bench -- --sample-size 30 --warm-up-time 2 --measuremen
 Each time is criterion's point estimate, and each ratio is the other sort's time divided by turbosort's. In run A, `sort_parallel` on 1M `u32` took 20.9 ms, against 19.8 ms for the serial sort and 20.8 ms for `sort_unstable`.
 
 At 4K, where the data fits in cache, the ratios against `sort_unstable` match the laptop's to two digits (1.61x for `u32`, 0.71x for `u64`). At 1M they do not, and they varied: `sort_unstable` on `u32` stayed between 19.5 and 20.5 ms across the three runs, while turbosort's time moved from 12.6 ms to 23.5 ms. These runs do not show why. The `u64` loss at 1M held in both runs that measured it. A three-sort run of `examples/profile` on the same VM (`profile u32 1000000 3 ts`, then with `std`) gave 20.74 ms per sort for turbosort and 23.17 ms for `sort_unstable`.
+
+## Since 0.2.1
+
+These runs were made on 2026-10-01 on a shared cloud VM: a KVM guest with 4 vCPUs of an Intel Xeon at 2.10 GHz (AVX2 and AVX-512), 48 KiB of L1d and 2 MiB of L2 per core and a shared 260 MiB L3, using Rust 1.97.0. "Before" is commit 0ccf74e, the 0.2.1 code with later README changes, with the new `benches/sort_bench.rs` copied in so that both sides run the same benchmark file; "after" is the code with the changes listed under Unreleased in [CHANGELOG.md](../CHANGELOG.md). Each side is one criterion run at 20 samples per point, and each ratio is `sort_unstable`'s time from the same run divided by turbosort's. The host is shared, so absolute times drift between runs; compare the ratios.
+
+```sh
+# Run in each tree; the second command is the random-input groups.
+cargo bench --bench sort_bench -- '^patterns/' --sample-size 20 --warm-up-time 1 --measurement-time 2
+cargo bench --bench sort_bench -- '^turbosort/(u32|u64|i32|f32)/(turbosort|std_unstable)/(16|128|512|4096|65536|1000000)$' --sample-size 20 --warm-up-time 1 --measurement-time 3
+```
+
+### Patterned inputs
+
+The `patterns` group: sorted and reversed input, four distinct values in rotation, a pipe organ (ascending then descending), a sawtooth of eight ascending runs, and a random permutation of 0..n.
+
+| Input | Size | Before | After | Before vs `sort_unstable` | After vs `sort_unstable` |
+| --- | --- | --- | --- | --- | --- |
+| `u32`, sorted | 512 | 5.06 µs | 81 ns | 0.05x | 2.98x |
+| `u32`, reversed | 512 | 5.53 µs | 142 ns | 0.05x | 1.91x |
+| `u32`, four distinct values | 512 | 36.1 µs | 1.89 µs | 0.06x | 0.84x |
+| `u32`, pipe organ | 512 | 7.56 µs | 1.91 µs | 0.52x | 2.25x |
+| `u32`, sawtooth | 512 | 43 µs | 1.8 µs | 0.11x | 1.78x |
+| `u32`, random permutation | 512 | 3.19 µs | 1.83 µs | 1.17x | 2.33x |
+| `u64`, sorted | 512 | 2.34 µs | 122 ns | 0.12x | 1.77x |
+| `u64`, reversed | 512 | 2.21 µs | 194 ns | 0.14x | 1.28x |
+| `u64`, four distinct values | 512 | 41.5 µs | 1.75 µs | 0.05x | 1.05x |
+| `u64`, pipe organ | 512 | 39.8 µs | 4.15 µs | 0.10x | 1.03x |
+| `u64`, sawtooth | 512 | 34.9 µs | 3.65 µs | 0.11x | 1.08x |
+| `u64`, random permutation | 512 | 4.82 µs | 3.72 µs | 0.89x | 0.98x |
+| `u32`, sorted | 65,536 | 23.9 µs | 9.4 µs | 1.03x | 2.80x |
+| `u32`, reversed | 65,536 | 865 µs | 16.5 µs | 0.04x | 1.67x |
+| `u32`, four distinct values | 65,536 | 229 µs | 252 µs | 0.91x | 0.89x |
+| `u32`, pipe organ | 65,536 | 1 ms | 969 µs | 1.14x | 1.14x |
+| `u32`, sawtooth | 65,536 | 1.06 ms | 1.11 ms | 1.03x | 0.76x |
+| `u32`, random permutation | 65,536 | 796 µs | 758 µs | 1.26x | 1.48x |
+| `u64`, sorted | 65,536 | 40.9 µs | 17.6 µs | 0.84x | 1.46x |
+| `u64`, reversed | 65,536 | 1.12 ms | 28.8 µs | 0.03x | 1.27x |
+| `u64`, four distinct values | 65,536 | 390 µs | 415 µs | 0.53x | 0.54x |
+| `u64`, pipe organ | 65,536 | 717 µs | 805 µs | 1.43x | 1.50x |
+| `u64`, sawtooth | 65,536 | 639 µs | 555 µs | 1.42x | 1.71x |
+| `u64`, random permutation | 65,536 | 964 µs | 924 µs | 1.05x | 1.24x |
+
+At 512 elements the ordered and repetitive patterns were 0.05x to 0.52x of `sort_unstable` before: the quicksorts in the 17 to 512 tier handed the whole slice to insertion sort when median-of-three picked the minimum. The reversed rows at 65,536 ran every radix pass before and are reversed in one scan now. The other 65,536-element rows run the same radix sort on both sides, so their differences are run-to-run noise (the `u32` sawtooth moved from 1.03x to 0.76x with no code change). Four distinct values stays below `sort_unstable` at both widths, because the standard library partitions equal keys away while the radix sort runs every live pass.
+
+### Random inputs
+
+The existing groups, minus voracious and 10M. `u32`, `i32` and `f32` at 4K and up run the same radix code on both sides, so their rows show the noise; `u64` changed because the radix sort now diverts, and 512 `u32` because of the network-and-merge tier.
+
+| Type | Size | Before | After | Before vs `sort_unstable` | After vs `sort_unstable` |
+| --- | --- | --- | --- | --- | --- |
+| `u32` | 16 | 42 ns | 23 ns | 1.37x | 2.04x |
+| `u32` | 128 | 298 ns | 294 ns | 2.25x | 2.51x |
+| `u32` | 512 | 3.15 µs | 2.06 µs | 1.46x | 2.15x |
+| `u32` | 4,096 | 23.1 µs | 24 µs | 1.68x | 1.65x |
+| `u32` | 65,536 | 410 µs | 430 µs | 2.52x | 2.35x |
+| `u32` | 1M | 11.6 ms | 10.3 ms | 1.64x | 1.88x |
+| `i32` | 128 | 294 ns | 304 ns | 2.48x | 2.56x |
+| `i32` | 4,096 | 24.2 µs | 21.2 µs | 1.65x | 1.85x |
+| `i32` | 1M | 10.1 ms | 9.81 ms | 2.13x | 1.91x |
+| `f32` | 128 | 286 ns | 294 ns | 4.04x | 3.92x |
+| `f32` | 4,096 | 38.9 µs | 32.3 µs | 1.68x | 1.97x |
+| `f32` | 1M | 9.32 ms | 9.67 ms | 3.22x | 2.91x |
+| `u64` | 128 | 795 ns | 680 ns | 0.89x | 1.07x |
+| `u64` | 4,096 | 65.7 µs | 39.1 µs | 0.63x | 1.18x |
+| `u64` | 1M | 31.8 ms | 21 ms | 0.65x | 0.90x |

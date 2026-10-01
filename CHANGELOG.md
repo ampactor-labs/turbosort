@@ -4,6 +4,59 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- From 17 to 512 elements, both quicksorts (AVX2 for 4-byte keys from 129
+  elements, scalar for every other case) handed the whole slice to
+  insertion sort when median-of-three picked the minimum or the depth limit
+  hit. Sorted, reversed, few-unique, pipe-organ and sawtooth input ran at
+  0.05x to 0.52x of `sort_unstable` at 512 elements (up to 43 µs against
+  2-5 µs).
+- `sort` without the `alloc` feature went quadratic above 512 elements on
+  the same patterns: 795 ms for 80,000 `u32` of `i % 4`. It now uses
+  `core`'s `sort_unstable`.
+- Reversed input above 512 elements ran every radix pass, at 0.03x to 0.11x
+  of `sort_unstable` from 1K to 64K elements; it is now reversed in one scan.
+- The rustdoc said NaN sorts last. Only a NaN with the sign bit clear does;
+  one with it set (x86's `0.0 / 0.0`) sorts first, as `f32::total_cmp` and
+  the README say.
+- `sort_parallel` below 131,072 elements ran the radix core directly, even
+  for slices the networks handle; it now runs the serial `sort`.
+
+### Changed
+- AVX2, 4-byte keys, 129 to 512 elements: 128-element network blocks merged
+  with an 8-wide bitonic merge replace the quicksort. 512 random `u32` went
+  from 1.46x to 2.15x `sort_unstable` on a 4-vCPU Xeon VM, and no input
+  pattern is slower than another.
+- Every other type and platform from 17 to 512 elements uses `core`'s
+  `sort_unstable_by_key` on the radix key instead of the scalar quicksort.
+- Above 16 elements, one vectorized scan finishes ascending and descending
+  input before any tier runs; before, only the radix tier checked, and only
+  for ascending input.
+- `u8` and `i8` use the counting sort from 64 elements instead of 513, in
+  every build, with interleaved counters from 8,192 elements.
+- Diverting LSD for wide keys: the radix sort sorts only the top digits that
+  carry log2(n) + 2 bits, then one scan finishes the short runs left. Random
+  `u64` went from 0.63x to 1.18x `sort_unstable` at 4K and from 0.65x to
+  0.90x at 1M on the VM. `sort_parallel` does not divert yet.
+- The crate description no longer says "SIMD-accelerated radix sort": the
+  radix passes are scalar; SIMD is in the small-slice networks and merges.
+
+### Added
+- A `patterns` benchmark group: sorted, reversed, few-unique, pipe-organ,
+  sawtooth and permutation inputs for `u32` and `u64` at 512 and 65,536.
+- Tests for the merge tier at every length from 129 to 512, the presorted
+  scan, the diverting digit choice and finishing scan, presorted input in
+  every tier, and structured `u64` and `f64` inputs.
+- CI runs the test suite without default features and with only `alloc`,
+  and lints tests and benches; the release workflow runs the tests before
+  publishing.
+
+### Removed
+- The AVX2 partition (`src/arch/x86_64/partition.rs`) and its lookup table
+  (`src/lut.rs`), which only the quicksort used.
+
 ## [0.2.1] - 2026-07-29
 
 ### Added
@@ -87,6 +140,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - AVX2 sorting networks for tiny inputs, quicksort + SIMD leaf for mid-range
   arrays, and LSD radix for large arrays.
 
+[Unreleased]: https://github.com/ampactor-labs/turbosort/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/ampactor-labs/turbosort/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ampactor-labs/turbosort/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ampactor-labs/turbosort/compare/v0.1.0...v0.1.1

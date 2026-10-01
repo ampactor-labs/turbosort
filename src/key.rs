@@ -9,8 +9,9 @@
 //! - **Unsigned integers:** identity (already radix-sortable).
 //! - **Signed integers:** XOR the sign bit to flip negative/positive ordering.
 //! - **Floats:** IEEE 754 trick — positive: flip sign bit; negative: flip all bits.
-//!   This maps the float total order to unsigned integer order, with -0.0 < +0.0
-//!   and NaN values sorted deterministically to the end.
+//!   This maps the IEEE 754 total order (`f32::total_cmp`) to unsigned integer
+//!   order: -0.0 < +0.0, NaNs with the sign bit clear sort after +inf, and
+//!   NaNs with it set sort before -inf.
 
 use core::mem;
 
@@ -158,7 +159,8 @@ impl SortableKey for f32 {
         let bits = self.to_bits();
         // Positive floats (sign bit 0): flip sign bit → maps to upper half of u32.
         // Negative floats (sign bit 1): flip ALL bits → maps to lower half, reversed.
-        // NaN: has exponent=0xFF, so sorts to the very end (after +inf).
+        // NaN: exponent 0xFF, so a positive NaN lands after +inf and a negative
+        // one (sign bit set, as x86 produces for 0.0/0.0) before -inf.
         if bits & 0x8000_0000 == 0 {
             bits ^ 0x8000_0000
         } else {

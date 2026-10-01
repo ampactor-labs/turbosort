@@ -1,8 +1,9 @@
-//! SIMD-accelerated radix sort for primitive types.
+//! Radix sort for primitive types, with SIMD sorting networks for short slices.
 //!
-//! `turbosort` provides O(n) LSD radix sort with SIMD acceleration for the 10
-//! primitive numeric types: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
-//! `i64`, `f32`, `f64`.
+//! `turbosort` sorts slices of the 10 primitive numeric types (`u8`, `u16`,
+//! `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`) with an O(n) LSD
+//! radix sort above 512 elements, and with AVX2 or NEON sorting networks
+//! below that for 4-byte types.
 //!
 //! # Features
 //!
@@ -58,8 +59,11 @@ pub use key::SortableKey;
 /// - 17 ≤ n ≤ 512: with AVX2 and a 4-byte key, register networks up to 128
 ///   elements and merged 128-element blocks above that; otherwise `core`'s
 ///   unstable sort
-/// - n > 512: LSD radix sort (requires `alloc` feature); already-sorted
-///   inputs are detected in one scan and returned unchanged
+/// - n > 512: LSD radix sort (requires `alloc` feature)
+///
+/// Above 16 elements, input that is already sorted, ascending or descending,
+/// is detected in one scan and finished without sorting, and `u8`/`i8` use a
+/// counting sort from 64 elements.
 ///
 /// Without the `alloc` feature, arrays over 512 elements use `core`'s
 /// unstable sort, which needs no scratch memory.
@@ -72,12 +76,16 @@ pub use key::SortableKey;
 /// assert_eq!(v, vec![-9, -1, -1, 3, 4, 5]);
 /// ```
 ///
+/// Floats sort in the order of `f32::total_cmp`. `f32::NAN` has its sign bit
+/// clear and sorts last; a NaN with the sign bit set (on x86, `0.0 / 0.0`
+/// computed at run time gives one) sorts first.
+///
 /// ```
 /// let mut v = vec![1.0f32, f32::NAN, -0.0, 0.0, f32::NEG_INFINITY];
 /// turbosort::sort(&mut v);
 /// assert_eq!(v[0], f32::NEG_INFINITY);
 /// assert!(v[1].to_bits() == (-0.0f32).to_bits()); // -0.0 < +0.0
-/// assert!(v[4].is_nan()); // NaN sorted to end
+/// assert!(v[4].is_nan()); // f32::NAN is a positive NaN
 /// ```
 #[inline]
 pub fn sort<T: SortableKey>(slice: &mut [T]) {
