@@ -1,5 +1,9 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::measurement::WallTime;
+use criterion::{
+    criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
+};
 use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use voracious_radix_sort::RadixSort;
 
@@ -143,6 +147,81 @@ fn bench_turbosort_i32(c: &mut Criterion) {
     group.finish();
 }
 
+/// Ordered and repetitive inputs, which uniform random data never produces.
+/// In 0.2.1 the 129-512 quicksort went quadratic on most of them, reversed
+/// input ran every radix pass, and a permutation's equal-sized buckets
+/// alias in the cache.
+const PATTERNS: [&str; 6] = [
+    "sorted",
+    "reversed",
+    "few_unique",
+    "pipe_organ",
+    "sawtooth",
+    "permutation",
+];
+
+fn gen_pattern(pattern: &str, n: usize) -> Vec<u64> {
+    let mut rng = StdRng::seed_from_u64(0xDEADBEEF);
+    let n = n as u64;
+    match pattern {
+        "sorted" => (0..n).collect(),
+        "reversed" => (0..n).rev().collect(),
+        "few_unique" => (0..n).map(|i| i % 4).collect(),
+        "pipe_organ" => (0..n).map(|i| if i < n / 2 { i } else { n - i }).collect(),
+        "sawtooth" => (0..n).map(|i| i % (n / 8)).collect(),
+        "permutation" => {
+            let mut v: Vec<u64> = (0..n).collect();
+            v.shuffle(&mut rng);
+            v
+        }
+        _ => unreachable!("unknown pattern {pattern}"),
+    }
+}
+
+fn bench_pair<T: turbosort::SortableKey + Ord>(
+    group: &mut BenchmarkGroup<WallTime>,
+    name: &str,
+    data: &[T],
+) {
+    let size = data.len();
+    group.bench_with_input(
+        BenchmarkId::new(format!("turbosort/{name}"), size),
+        data,
+        |b, data| {
+            b.iter_batched_ref(
+                || data.to_vec(),
+                |d| turbosort::sort(d),
+                criterion::BatchSize::LargeInput,
+            )
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new(format!("std_unstable/{name}"), size),
+        data,
+        |b, data| {
+            b.iter_batched_ref(
+                || data.to_vec(),
+                |d| d.sort_unstable(),
+                criterion::BatchSize::LargeInput,
+            )
+        },
+    );
+}
+
+fn bench_patterns(c: &mut Criterion) {
+    let mut group = c.benchmark_group("patterns");
+    for &size in &[512, 65_536] {
+        group.throughput(Throughput::Elements(size as u64));
+        for pattern in PATTERNS {
+            let data = gen_pattern(pattern, size);
+            let narrow: Vec<u32> = data.iter().map(|&x| x as u32).collect();
+            bench_pair(&mut group, &format!("u32/{pattern}"), &narrow);
+            bench_pair(&mut group, &format!("u64/{pattern}"), &data);
+        }
+    }
+    group.finish();
+}
+
 #[cfg(feature = "parallel")]
 fn bench_parallel_u32(c: &mut Criterion) {
     let mut group = c.benchmark_group("parallel/u32");
@@ -180,6 +259,7 @@ criterion_group!(
     bench_turbosort_u64,
     bench_turbosort_f32,
     bench_turbosort_i32,
+    bench_patterns,
 );
 
 #[cfg(feature = "parallel")]
