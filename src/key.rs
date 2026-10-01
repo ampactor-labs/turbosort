@@ -15,7 +15,7 @@
 
 use core::mem;
 
-/// Marker trait for unsigned integer keys used in radix sorting.
+/// Unsigned integer keys, as the radix sort sees them.
 ///
 /// Implementors must be `Copy`, convertible to/from byte arrays, and support
 /// the bitwise operations needed for radix digit extraction.
@@ -39,6 +39,9 @@ pub trait UnsignedKey: Copy + Ord + private::Sealed + Sized {
     /// Construct a key from a single byte value. Only meaningful for one-byte
     /// keys, where the digit is the whole key (the counting-sort path).
     fn from_digit(digit: u8) -> Self;
+
+    /// The key zero-extended to 64 bits.
+    fn to_u64(self) -> u64;
 }
 
 /// Trait mapping a sortable primitive to its unsigned radix key.
@@ -94,6 +97,11 @@ macro_rules! impl_unsigned_key {
                 #[inline(always)]
                 fn from_digit(digit: u8) -> Self {
                     digit as $ty
+                }
+
+                #[inline(always)]
+                fn to_u64(self) -> u64 {
+                    self as u64
                 }
             }
         )*

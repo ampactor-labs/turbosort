@@ -46,6 +46,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scatter's write positions contend for a few cache sets. A random
   permutation of 65,536 `u32` went from 758 µs to 344 µs (1.48x to 3.14x
   `sort_unstable`); random keys never take this path.
+- The radix sort histograms only the bytes that vary. A first scan finds
+  them and stops early when every byte varies, so random keys pay nothing;
+  `u64` keys holding small values skip most of the histogram work. 65,536
+  `u64` with four distinct values went from 0.54x to 1.33x `sort_unstable`,
+  and `u32` from 0.89x to 1.23x.
 - The crate description no longer says "SIMD-accelerated radix sort": the
   radix passes are scalar; SIMD is in the small-slice networks and merges.
 

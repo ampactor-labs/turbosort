@@ -132,11 +132,15 @@ fn large_u64_structured() {
 
     let mut rng = StdRng::seed_from_u64(77);
     for size in [70_000usize, 200_000] {
-        let shapes: [(&str, Vec<u64>); 6] = [
+        let shapes: [(&str, Vec<u64>); 7] = [
             ("random", (0..size).map(|_| rng.gen()).collect()),
             (
                 "low 40 bits",
                 (0..size).map(|_| rng.gen::<u64>() >> 24).collect(),
+            ),
+            (
+                "constant low bytes",
+                (0..size).map(|_| rng.gen_range(0..5000u64) << 32).collect(),
             ),
             (
                 "top bit split",

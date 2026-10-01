@@ -161,10 +161,24 @@ unsafe fn sort_core_bytes<T: SortableKey, const PASSES: usize>(slice: &mut [T], 
     let len = slice.len();
     debug_assert_eq!(PASSES, T::Key::BYTES);
 
-    let hist = if len >= INTERLEAVE_MIN {
-        histogram::compute_bytes::<T, PASSES, 4>(slice)
-    } else {
-        histogram::compute_bytes::<T, PASSES, 1>(slice)
+    // Bytes that never vary need no histogram: keys holding small values in a
+    // wide type often vary in only one or two. The scan that finds them stops
+    // within the first block when every byte varies.
+    let varying = histogram::varying_bits(slice);
+    let mut counted = [0usize; PASSES];
+    let mut n_counted = 0;
+    for pass in 0..PASSES {
+        if (varying >> (8 * pass)) & 0xFF != 0 {
+            counted[n_counted] = pass;
+            n_counted += 1;
+        }
+    }
+    let counted = &counted[..n_counted];
+    let hist = match (n_counted == PASSES, len >= INTERLEAVE_MIN) {
+        (true, true) => histogram::compute_bytes::<T, PASSES, 4>(slice),
+        (true, false) => histogram::compute_bytes::<T, PASSES, 1>(slice),
+        (false, true) => histogram::compute_bytes_live::<T, PASSES, 4>(slice, counted),
+        (false, false) => histogram::compute_bytes_live::<T, PASSES, 1>(slice, counted),
     };
 
     // Live passes: digits that vary. A digit is constant exactly when the
@@ -340,15 +354,39 @@ unsafe fn sort_core_wide<T: SortableKey, const BINS: usize, const PASSES: usize>
     let bits = BINS.trailing_zeros();
     let mask = BINS - 1;
 
+    // As in the byte core, count only the digits that vary.
+    let varying = histogram::varying_bits(slice);
+    let mut counted = [0usize; PASSES];
+    let mut n_counted = 0;
+    for pass in 0..PASSES {
+        if (varying >> (pass as u32 * bits)) & mask as u64 != 0 {
+            counted[n_counted] = pass;
+            n_counted += 1;
+        }
+    }
+    let first = slice[0].to_radix_key();
     let mut hist = alloc::vec![0usize; PASSES * BINS];
-    for elem in slice.iter() {
-        let key = elem.to_radix_key();
+    if n_counted == PASSES {
+        for elem in slice.iter() {
+            let key = elem.to_radix_key();
+            for pass in 0..PASSES {
+                hist[pass * BINS + key.wide_digit(pass as u32 * bits, mask)] += 1;
+            }
+        }
+    } else {
+        for elem in slice.iter() {
+            let key = elem.to_radix_key();
+            for &pass in &counted[..n_counted] {
+                hist[pass * BINS + key.wide_digit(pass as u32 * bits, mask)] += 1;
+            }
+        }
         for pass in 0..PASSES {
-            hist[pass * BINS + key.wide_digit(pass as u32 * bits, mask)] += 1;
+            if !counted[..n_counted].contains(&pass) {
+                hist[pass * BINS + first.wide_digit(pass as u32 * bits, mask)] = len;
+            }
         }
     }
 
-    let first = slice[0].to_radix_key();
     let mut live = [0usize; PASSES];
     let mut n_live = 0;
     for pass in 0..PASSES {
