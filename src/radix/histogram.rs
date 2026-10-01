@@ -45,12 +45,14 @@ pub fn compute_bytes<T: SortableKey, const PASSES: usize, const COPIES: usize>(
 }
 
 /// The bits in which some key of `slice` (which must not be empty) differs
-/// from the first key.
+/// from the first key, or `None` if every byte of the key differs somewhere.
 ///
 /// Digits that never differ need no histogram and no pass. The scan stops as
-/// soon as every byte of the key has differed somewhere, which random keys do
-/// within the first block; every histogram is needed then anyway.
-pub fn varying_bits<T: SortableKey>(slice: &[T]) -> u64 {
+/// soon as every byte has differed, which random keys do within the first
+/// block; then every digit needs counting, and the bits seen so far are not
+/// returned because they may be incomplete (an 11-bit digit can straddle two
+/// bytes that each varied elsewhere).
+pub fn varying_bits<T: SortableKey>(slice: &[T]) -> Option<u64> {
     let first = slice[0].to_radix_key().to_u64();
     let every_byte = |diff: u64| (0..T::Key::BYTES).all(|p| (diff >> (8 * p)) & 0xFF != 0);
     let mut diff = 0;
@@ -59,10 +61,10 @@ pub fn varying_bits<T: SortableKey>(slice: &[T]) -> u64 {
             diff |= x.to_radix_key().to_u64() ^ first;
         }
         if every_byte(diff) {
-            break;
+            return None;
         }
     }
-    diff
+    Some(diff)
 }
 
 /// Like [`compute_bytes`], for the digits in `live` only. Every other digit
@@ -138,8 +140,10 @@ mod tests {
         let keys: Vec<u64> = (0..300u64)
             .map(|i| 0x1111_2222_0000_4455 | (i % 256) << 16 | (i / 256) << 63)
             .collect();
-        assert_eq!(varying_bits(&keys), 0x8000_0000_00FF_0000);
-        assert_eq!(varying_bits(&[7u32; 5]), 0);
+        assert_eq!(varying_bits(&keys), Some(0x8000_0000_00FF_0000));
+        assert_eq!(varying_bits(&[7u32; 5]), Some(0));
+        let all: Vec<u16> = (0..300u16).map(|i| i.wrapping_mul(0x9E37)).collect();
+        assert_eq!(varying_bits(&all), None);
     }
 
     #[test]
@@ -147,8 +151,9 @@ mod tests {
         let keys: Vec<u64> = (0..10_000u64)
             .map(|i| (i * 2654435761 % 4099) << 24)
             .collect();
+        let varying = varying_bits(&keys).unwrap();
         let live: Vec<usize> = (0..8)
-            .filter(|&p| (varying_bits(&keys) >> (8 * p)) & 0xFF != 0)
+            .filter(|&p| (varying >> (8 * p)) & 0xFF != 0)
             .collect();
         assert_eq!(live, vec![3, 4]);
         assert_eq!(

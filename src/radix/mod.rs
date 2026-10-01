@@ -168,7 +168,7 @@ unsafe fn sort_core_bytes<T: SortableKey, const PASSES: usize>(slice: &mut [T], 
     let mut counted = [0usize; PASSES];
     let mut n_counted = 0;
     for pass in 0..PASSES {
-        if (varying >> (8 * pass)) & 0xFF != 0 {
+        if varying.map_or(true, |v| (v >> (8 * pass)) & 0xFF != 0) {
             counted[n_counted] = pass;
             n_counted += 1;
         }
@@ -325,6 +325,32 @@ mod tests {
         );
     }
 
+    /// The varying-bits scan may stop once every byte has varied. An 11-bit
+    /// digit can straddle bytes, so stopping early must not leave a digit
+    /// that only varies later uncounted.
+    #[test]
+    fn wide_core_counts_digits_that_vary_after_the_first_block() {
+        // One random bit in each high byte: every byte varies, but the high
+        // digits carry too few bits to divert, so every live digit gets a pass.
+        fn key(state: &mut u64, low_mask: u64) -> u64 {
+            let low = xorshift(state) & low_mask;
+            let r = xorshift(state);
+            low | (r & 1) << 32 | (r >> 1 & 1) << 40 | (r >> 2 & 1) << 48 | (r >> 3 & 1) << 56
+        }
+        let mut state = 0x1234_5678_9ABC_DEF1u64;
+        // The first 200 keys vary bytes 1 and 2 only through bits 8..=10 and
+        // 22..=23, outside the second 11-bit digit (bits 11..=21).
+        let early = 0xFFFF_FFFF & !(0x7FF << 11);
+        let mut data: Vec<u64> = (0..200).map(|_| key(&mut state, early)).collect();
+        // Later keys vary there too.
+        data.extend((0..3000).map(|_| key(&mut state, 0xFFFF_FFFF)));
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        let mut scratch: Vec<u64> = Vec::with_capacity(data.len());
+        unsafe { sort_core_wide::<u64, WIDE_BINS, WIDE_PASSES>(&mut data, scratch.as_mut_ptr()) };
+        assert_eq!(data, expected);
+    }
+
     #[test]
     fn byte_core_u64_interleaved_histogram() {
         // Above INTERLEAVE_MIN so the 4-copy histogram fold runs.
@@ -359,7 +385,7 @@ unsafe fn sort_core_wide<T: SortableKey, const BINS: usize, const PASSES: usize>
     let mut counted = [0usize; PASSES];
     let mut n_counted = 0;
     for pass in 0..PASSES {
-        if (varying >> (pass as u32 * bits)) & mask as u64 != 0 {
+        if varying.map_or(true, |v| (v >> (pass as u32 * bits)) & mask as u64 != 0) {
             counted[n_counted] = pass;
             n_counted += 1;
         }
