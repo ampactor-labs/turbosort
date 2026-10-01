@@ -73,6 +73,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On AVX2, slices of 2 and 3 four-byte keys use `core`'s sort instead of a
   network, and lengths up to 16 without a network use `core`'s
   `sort_unstable` instead of the crate's insertion sort.
+- Float keys are computed without a branch, so scans over them vectorize:
+  512 sorted `f32` went from 379 ns to 276 ns on the VM, and 65,536 from
+  32 µs to 25 µs.
 - The crate description no longer says "SIMD-accelerated radix sort": the
   radix passes are scalar; SIMD is in the small-slice networks and merges.
 

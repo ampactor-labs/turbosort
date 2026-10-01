@@ -169,21 +169,15 @@ impl SortableKey for f32 {
         // Negative floats (sign bit 1): flip ALL bits → maps to lower half, reversed.
         // NaN: exponent 0xFF, so a positive NaN lands after +inf and a negative
         // one (sign bit set, as x86 produces for 0.0/0.0) before -inf.
-        if bits & 0x8000_0000 == 0 {
-            bits ^ 0x8000_0000
-        } else {
-            !bits
-        }
+        // The arithmetic shift spreads the sign bit into a mask, so there is no
+        // branch and scans over keys vectorize.
+        bits ^ (((bits as i32) >> 31) as u32 | 0x8000_0000)
     }
 
     #[inline(always)]
     fn from_radix_key(key: u32) -> Self {
-        let bits = if key & 0x8000_0000 == 0 {
-            !key
-        } else {
-            key ^ 0x8000_0000
-        };
-        f32::from_bits(bits)
+        // A key with its top bit set came from a positive float.
+        f32::from_bits(key ^ (!((key as i32) >> 31) as u32 | 0x8000_0000))
     }
 }
 
@@ -193,21 +187,13 @@ impl SortableKey for f64 {
     #[inline(always)]
     fn to_radix_key(self) -> u64 {
         let bits = self.to_bits();
-        if bits & 0x8000_0000_0000_0000 == 0 {
-            bits ^ 0x8000_0000_0000_0000
-        } else {
-            !bits
-        }
+        // As for f32.
+        bits ^ (((bits as i64) >> 63) as u64 | 0x8000_0000_0000_0000)
     }
 
     #[inline(always)]
     fn from_radix_key(key: u64) -> Self {
-        let bits = if key & 0x8000_0000_0000_0000 == 0 {
-            !key
-        } else {
-            key ^ 0x8000_0000_0000_0000
-        };
-        f64::from_bits(bits)
+        f64::from_bits(key ^ (!((key as i64) >> 63) as u64 | 0x8000_0000_0000_0000))
     }
 }
 
@@ -260,6 +246,38 @@ mod tests {
         for v in [f32::NEG_INFINITY, -1.0, -0.0, 0.0, 1.0, f32::INFINITY] {
             let rt = f32::from_radix_key(v.to_radix_key());
             assert_eq!(v.to_bits(), rt.to_bits(), "roundtrip failed for {v}");
+        }
+    }
+
+    #[test]
+    fn float_keys_match_total_cmp_on_any_bits() {
+        // Random bit patterns hit NaNs, subnormals and both zeros of both
+        // signs; the order and the round trip must hold for all of them.
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let edges = [0, 1, 0x7FFF_FFFF, 0x8000_0000, 0x8000_0001, u32::MAX];
+        let mut f32s: Vec<f32> = edges.iter().map(|&b| f32::from_bits(b)).collect();
+        let mut f64s: Vec<f64> = edges.iter().map(|&b| f64::from_bits(b as u64)).collect();
+        f64s.extend([f64::from_bits(1 << 63), f64::from_bits(u64::MAX)]);
+        for _ in 0..2000 {
+            let r = next();
+            f32s.push(f32::from_bits(r as u32));
+            f64s.push(f64::from_bits(r));
+        }
+        for (i, a) in f32s.iter().enumerate() {
+            assert_eq!(f32::from_radix_key(a.to_radix_key()).to_bits(), a.to_bits());
+            let b = f32s[(i * 7 + 3) % f32s.len()];
+            assert_eq!(a.total_cmp(&b), a.to_radix_key().cmp(&b.to_radix_key()));
+        }
+        for (i, a) in f64s.iter().enumerate() {
+            assert_eq!(f64::from_radix_key(a.to_radix_key()).to_bits(), a.to_bits());
+            let b = f64s[(i * 7 + 3) % f64s.len()];
+            assert_eq!(a.total_cmp(&b), a.to_radix_key().cmp(&b.to_radix_key()));
         }
     }
 }
