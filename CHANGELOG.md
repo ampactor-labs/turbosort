@@ -101,6 +101,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CI runs the test suite without default features and with only `alloc`,
   and lints tests and benches; the release workflow runs the tests before
   publishing.
+- The release workflow can publish through crates.io Trusted Publishing
+  (short-lived tokens from GitHub's OIDC identity) once it is configured on
+  crates.io, and falls back to the `CARGO_REGISTRY_TOKEN` secret until then.
+  Its checkout no longer keeps the GitHub token in `.git/config`.
 
 ### Removed
 - The AVX2 partition (`src/arch/x86_64/partition.rs`) and its lookup table
