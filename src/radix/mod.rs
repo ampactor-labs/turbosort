@@ -194,7 +194,11 @@ unsafe fn sort_core_bytes<T: SortableKey, const PASSES: usize>(slice: &mut [T], 
         };
         // SAFETY: offsets is the exclusive prefix sum of this pass's histogram
         // of src[..len]; src/dst validity comes from the sort_raw contract.
-        scatter::scatter_pass(src, dst, len, &mut offsets, pass);
+        if scatter::wants_combining(&hist[pass], len) {
+            scatter::scatter_pass_combined(src, dst, len, &offsets, pass);
+        } else {
+            scatter::scatter_pass(src, dst, len, &mut offsets, pass);
+        }
         in_scratch = !in_scratch;
     }
 

@@ -185,6 +185,61 @@ fn large_u64_structured() {
     }
 }
 
+/// Inputs whose radix buckets all hold the same number of keys take the
+/// write-combining scatter; check them at sizes above its threshold, for
+/// every key width and through both entry points.
+#[test]
+fn equal_bucket_inputs() {
+    use rand::rngs::StdRng;
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+
+    let mut rng = StdRng::seed_from_u64(1234);
+    for size in [16_384usize, 65_536 + 17, 200_000] {
+        let mut perm: Vec<u32> = (0..size as u32).collect();
+        perm.shuffle(&mut rng);
+        let organ: Vec<u32> = (0..size as u32)
+            .map(|i| {
+                if (i as usize) < size / 2 {
+                    2 * i
+                } else {
+                    2 * (size as u32 - 1 - i)
+                }
+            })
+            .collect();
+
+        for (shape, base) in [("permutation", &perm), ("pipe organ", &organ)] {
+            let mut expected = base.clone();
+            expected.sort_unstable();
+            let mut data = base.clone();
+            turbosort::sort(&mut data);
+            assert_eq!(data, expected, "u32 {shape} {size}");
+
+            let wide: Vec<u64> = base.iter().map(|&x| x as u64 * 3).collect();
+            let mut expected = wide.clone();
+            expected.sort_unstable();
+            let mut data = wide.clone();
+            let mut buf = vec![0u64; size];
+            turbosort::sort_with_buffer(&mut data, &mut buf);
+            assert_eq!(data, expected, "u64 {shape} {size}");
+
+            let narrow: Vec<u16> = base.iter().map(|&x| x as u16).collect();
+            let mut expected = narrow.clone();
+            expected.sort_unstable();
+            let mut data = narrow;
+            turbosort::sort(&mut data);
+            assert_eq!(data, expected, "u16 {shape} {size}");
+
+            let floats: Vec<f32> = base.iter().map(|&x| x as f32 - 1000.0).collect();
+            let mut data = floats.clone();
+            turbosort::sort(&mut data);
+            let mut expected = floats;
+            expected.sort_by(|a, b| a.total_cmp(b));
+            assert_eq!(data, expected, "f32 {shape} {size}");
+        }
+    }
+}
+
 // --- Float edge cases ---
 
 #[test]

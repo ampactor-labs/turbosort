@@ -44,6 +44,16 @@ pub fn compute_bytes<T: SortableKey, const PASSES: usize, const COPIES: usize>(
     out
 }
 
+/// The histogram of the byte digit at `pass` alone, for tests.
+#[cfg(test)]
+pub fn compute_bytes_one<T: SortableKey>(slice: &[T], pass: usize) -> [[usize; 256]; 1] {
+    let mut h = [0usize; 256];
+    for elem in slice {
+        h[elem.to_radix_key().radix_digit(pass) as usize] += 1;
+    }
+    [h]
+}
+
 /// Check if a pass can be skipped (all elements have the same digit).
 ///
 /// A pass where one bin has count == total length means that digit position

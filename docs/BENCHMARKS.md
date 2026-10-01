@@ -115,6 +115,18 @@ The `patterns` group: sorted and reversed input, four distinct values in rotatio
 
 At 512 elements the ordered and repetitive patterns were 0.05x to 0.52x of `sort_unstable` before: the quicksorts in the 17 to 512 tier handed the whole slice to insertion sort when median-of-three picked the minimum. The reversed rows at 65,536 ran every radix pass before and are reversed in one scan now. The other 65,536-element rows run the same radix sort on both sides, so their differences are run-to-run noise (the `u32` sawtooth moved from 1.03x to 0.76x with no code change). Four distinct values stays below `sort_unstable` at both widths, because the standard library partitions equal keys away while the radix sort runs every live pass.
 
+### Write combining
+
+Equal-sized buckets (a permutation of 0..n, a pipe organ) made the plain scatter's write positions contend for a few cache sets, and the byte passes now stage writes in cache lines for that shape. The same patterns benchmark on the same VM, after that change, as the mean point estimates criterion recorded:
+
+| Input | Size | Before write combining | After | After vs `sort_unstable` |
+| --- | --- | --- | --- | --- |
+| `u32`, random permutation | 65,536 | 758 µs | 344 µs | 3.14x |
+| `u32`, pipe organ | 65,536 | 969 µs | 692 µs | 1.70x |
+| `u32`, sawtooth | 65,536 | 1.11 ms | 827 µs | 1.28x |
+
+8-byte keys of this size take the 11-bit path, which does not combine; their rows did not change.
+
 ### Random inputs
 
 The existing groups, minus voracious and 10M. `u32`, `i32` and `f32` at 4K and up run the same radix code on both sides, so their rows show the noise; `u64` changed because the radix sort now diverts, and 512 `u32` because of the network-and-merge tier.

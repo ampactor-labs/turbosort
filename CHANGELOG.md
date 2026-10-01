@@ -40,6 +40,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   carry log2(n) + 2 bits, then one scan finishes the short runs left. Random
   `u64` went from 0.63x to 1.18x `sort_unstable` at 4K and from 0.65x to
   0.90x at 1M on the VM. `sort_parallel` does not divert yet.
+- Byte radix passes whose buckets are many and nearly equal in size
+  (permutations, pipe organs, sawtooths) stage each bucket's writes in a
+  cache-line buffer and write whole lines. With equal buckets the plain
+  scatter's write positions contend for a few cache sets. A random
+  permutation of 65,536 `u32` went from 758 µs to 344 µs (1.48x to 3.14x
+  `sort_unstable`); random keys never take this path.
 - The crate description no longer says "SIMD-accelerated radix sort": the
   radix passes are scalar; SIMD is in the small-slice networks and merges.
 
