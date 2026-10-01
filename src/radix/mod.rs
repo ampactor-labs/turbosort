@@ -102,12 +102,17 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
 }
 
 /// Counting sort for one-byte keys: histogram, then rewrite from counts.
+///
+/// Needs no scratch buffer, so it also serves `no_std` builds without
+/// `alloc`. Large inputs count into four interleaved histograms, like the
+/// radix passes, so runs of equal bytes do not serialize on one counter.
 pub(crate) fn counting_sort<T: SortableKey>(slice: &mut [T]) {
     debug_assert_eq!(T::Key::BYTES, 1);
-    let mut counts = [0usize; 256];
-    for elem in slice.iter() {
-        counts[elem.to_radix_key().radix_digit(0) as usize] += 1;
-    }
+    let [counts] = if slice.len() >= INTERLEAVE_MIN {
+        histogram::compute_bytes::<T, 1, 4>(slice)
+    } else {
+        histogram::compute_bytes::<T, 1, 1>(slice)
+    };
     let mut i = 0;
     for (d, &count) in counts.iter().enumerate() {
         if count > 0 {
@@ -201,6 +206,19 @@ mod tests {
     fn counting_sort_u8_all_values() {
         let mut state = 0x9E3779B97F4A7C15u64;
         let mut data: Vec<u8> = (0..2000).map(|_| xorshift(&mut state) as u8).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        counting_sort(&mut data);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn counting_sort_i8_interleaved_runs() {
+        // Above INTERLEAVE_MIN, with long runs of one value (the case the
+        // interleaving exists for) and every i8 value present.
+        let mut data: Vec<i8> = (0..INTERLEAVE_MIN as i32 * 2)
+            .map(|i| ((i / 97) % 256 - 128) as i8)
+            .collect();
         let mut expected = data.clone();
         expected.sort_unstable();
         counting_sort(&mut data);
