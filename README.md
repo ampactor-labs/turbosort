@@ -75,12 +75,12 @@ With `default-features = false` the crate is `no_std`. Call `sort_with_buffer` t
 | Length | Algorithm |
 | --- | --- |
 | 0 to 1 | Nothing to do |
-| 2 to 16 | Sorting network: AVX2 on x86_64, NEON on aarch64 |
+| 2 to 16 | Sorting network: AVX2 on x86_64 from 4 elements, NEON on aarch64 |
 | 17 to 128 | Sorting networks padded to 32, 64 or 128 elements, built by merging sorted runs inside AVX2 registers |
 | 129 to 512 | 128-element blocks sorted by those networks, then merged pairwise with an 8-wide AVX2 bitonic merge |
 | 513 and up | LSD radix sort |
 
-A sorting network is a fixed sequence of compare-and-swap steps, so it has no data-dependent branches and maps onto SIMD min and max instructions. The merges do not depend on the data's order either, so in the SIMD rows every input pattern costs the same. Those rows apply only to types with 4-byte keys (`u32`, `i32`, `f32`) on a CPU that has the instructions. Every other case uses insertion sort up to 16 elements and the standard library's `sort_unstable` (from `core`, so it allocates nothing) up to 512; on aarch64 that includes 17 to 512 elements, because NEON only covers the 16-element networks. `u8` and `i8` switch to a counting sort at 64 elements.
+A sorting network is a fixed sequence of compare-and-swap steps, so it has no data-dependent branches and maps onto SIMD min and max instructions. The merges do not depend on the data's order either, so in the SIMD rows every input pattern costs the same. Those rows apply only to types with 4-byte keys (`u32`, `i32`, `f32`) on a CPU that has the instructions. Every other case uses the standard library's `sort_unstable` (from `core`, so it allocates nothing), which runs an insertion sort up to 20 elements; so do slices of 2 and 3 on AVX2, and on aarch64 17 to 512 elements, because NEON only covers the 16-element networks. `u8` and `i8` switch to a counting sort at 64 elements.
 
 Above 16 elements, one scan first checks whether the slice is already in order (`src/presorted.rs`). An ascending slice returns after it and a descending one is reversed, which sorts it because equal keys are identical values for these types. Random input fails the check within a comparison or two; the rest of the scan runs in fixed blocks that the compiler vectorizes.
 
@@ -103,7 +103,7 @@ The radix sort works from the least significant digit (LSD) up. Each pass distri
 | x86_64 | AVX2 | Networks up to 128 elements, networks and merges up to 512 |
 | x86_64 | SSE4.2 | Planned; no code yet |
 | aarch64 | NEON | Networks up to 16 elements |
-| Other | none | Insertion sort and `core`'s `sort_unstable`, the same radix sort |
+| Other | none | `core`'s `sort_unstable`, the same radix sort |
 
 On x86_64 the crate detects AVX2 at runtime through CPUID when the `std` feature is on, so one binary runs on any x86_64 CPU. NEON is part of every aarch64 CPU, so it needs no check.
 
@@ -176,6 +176,19 @@ The unreleased changes on `master` have not been measured on the laptop. On a cl
 
 The 17 to 512 rows changed because the two quicksorts are gone, the reversed rows because one scan now finishes presorted input, and the random `u64` rows because the radix sort diverts. Random `u32` from 4K to 1M did not change. [docs/BENCHMARKS.md](docs/BENCHMARKS.md#since-021) has every row with its times and the commands.
 
+Those benchmarks sort one input over and over, which lets the branch predictor learn insertion sort's and quicksort's comparisons at small sizes. Sorting 16,384 random `u32` cut into slices, so that every slice is new (the `small_batches` group), gave these speeds relative to `sort_unstable` on the same slices:
+
+| Slice length | 0.2.1 | now | now, per slice |
+| --- | --- | --- | --- |
+| 4 | 0.36x | 1.49x | 7.8 ns |
+| 8 | 1.82x | 7.55x | 6.8 ns |
+| 16 | 3.77x | 12.4x | 14.7 ns |
+| 17 | 1.65x | 4.62x | 42.3 ns |
+| 64 | 2.20x | 3.68x | 103 ns |
+| 512 | 0.84x | 2.41x | 1.90 µs |
+
+Below 17 elements, 0.2.1 lost most of its time outside the network itself: it copied keys into a stack buffer one at a time and read them back with vector loads, which wait for such stores to reach the cache, and in some builds every call probed 40 KiB of stack for the radix sort's histograms. Neither happens now ([docs/BENCHMARKS.md](docs/BENCHMARKS.md#batches-of-short-slices)).
+
 ## Testing
 
 ```sh
@@ -196,13 +209,12 @@ Miri reports AVX2 as unavailable, so the AVX2 code never runs under it, and the 
 
 The published speedups were measured on one laptop chip, an Intel i7-8665U, for release 0.2.1, and a second machine did not reproduce them for large arrays. Random 64-bit keys are the weak spot. In 0.2.1 they ran at 0.84x of the standard library's speed at 128 elements, 0.71x at 4K and 0.77x at 1M on the laptop, and voracious, another Rust radix sort, beat turbosort at all three sizes; on a shared cloud VM, 1M of them ran at 0.30x to 0.32x. The current code, on another cloud VM, reaches 1.07x at 128 and 1.18x at 4K but 0.90x at 1M. For large arrays of random 64-bit keys, measure voracious and the standard library against it.
 
-- x86 CPUs without AVX2 get insertion sort and `core`'s `sort_unstable` below 513 elements, because the planned SSE4.2 path is not written. Above 512 elements every CPU runs the same scalar radix sort.
+- x86 CPUs without AVX2 get `core`'s `sort_unstable` below 513 elements, because the planned SSE4.2 path is not written. Above 512 elements every CPU runs the same scalar radix sort.
 - AVX2 detection needs the `std` feature, so a `no_std` build on x86_64 never uses AVX2.
 - Without the `alloc` feature, `sort` uses `core`'s `sort_unstable` above 512 elements (and the counting sort for `u8` and `i8`): O(n log n) on every input, but no radix sort. Use `sort_with_buffer` in `no_std` code.
 - `sort_with_buffer` never allocates, so 8-byte keys stay on byte digits there. On skewed keys that cannot divert, that is up to 2x slower than `sort`'s 11-bit digits. Large 8-byte inputs use up to 64 KiB of stack for histograms, and passes that combine writes 16 KiB more.
 - 8-byte keys of 65,536 elements or more take the 11-bit path, which does not combine writes, so inputs that fill every bucket equally keep running slower than random keys there: a random permutation of 65,536 `u64` ran at 1.04x of `sort_unstable` in the `patterns` benchmark. Handing such input to the byte path paid off for pipe organs but not for permutations in measurements on the cloud VM.
 - Few distinct values whose bytes all vary (four random `u64` values repeated, say) still cost a full radix sort: 65,536 such keys ran at 0.14x of `sort_unstable` on the cloud VM, because the standard library partitions equal keys away. Small distinct values are fine, because their high bytes are constant: four distinct values in the `patterns` benchmark ran at 1.23x (`u32`) and 1.33x (`u64`).
-- From 17 to about 22 elements, 4-byte keys run the 32-element network, at 0.6x to 0.9x of `sort_unstable`'s speed on the cloud VM.
 - It sorts the ten primitive number types only. There is no comparator or key function, so it cannot sort structs or sort by a field, and `usize`, `isize`, `u128` and `i128` are not supported.
 - A NaN's sign bit decides where it sorts. `f32::NAN` sorts last, but on x86_64 a NaN produced by an invalid operation (`0.0 / 0.0` gives `0xffc00000`) has the sign bit set and sorts first.
 - `sort` is not a stable sort. For these types equal keys are identical bit patterns, so the order of equal elements cannot be observed.

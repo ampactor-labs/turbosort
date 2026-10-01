@@ -4,24 +4,22 @@
 
 use crate::key::SortableKey;
 
-/// Insertion sort on transformed keys. Optimal for n ≤ 16.
+/// Insertion sort on the radix keys, for the short runs that the diverting
+/// radix sort leaves (`radix::divert`).
 ///
-/// Operates in-place by comparing radix keys, but swaps original elements
-/// to maintain the type-correct output.
-///
-/// # Performance
-///
-/// O(n²) worst case, but fast for small n due to minimal overhead and
-/// branch-predictor-friendly access patterns.
+/// Each key is held out while the larger keys before it shift up one place,
+/// then written once into the gap. O(n²), so only for a few keys.
 #[inline]
 pub fn insertion_sort<T: SortableKey>(slice: &mut [T]) {
     for i in 1..slice.len() {
-        let key_i = slice[i].to_radix_key();
+        let elem = slice[i];
+        let key = elem.to_radix_key();
         let mut j = i;
-        while j > 0 && slice[j - 1].to_radix_key() > key_i {
-            slice.swap(j, j - 1);
+        while j > 0 && slice[j - 1].to_radix_key() > key {
+            slice[j] = slice[j - 1];
             j -= 1;
         }
+        slice[j] = elem;
     }
 }
 

@@ -13,13 +13,20 @@ pub mod aarch64;
 
 use crate::key::SortableKey;
 
+/// On x86_64 with AVX2, 4-byte keys from this length up go to the networks.
+/// A network costs about 7 ns at any length up to 8, which beats an
+/// insertion sort of 4 random keys by 1.5x to 2x but loses to one of 2 or 3
+/// keys, or of keys already in order, whose branches it predicts.
+#[cfg(target_arch = "x86_64")]
+const NETWORK_MIN: usize = 4;
+
 /// Sort a small slice (n ≤ 16) using the best available backend.
 #[inline]
 pub fn sort_tiny<T: SortableKey>(slice: &mut [T]) {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_avx2_u32_type::<T>() {
-            unsafe { x86_64::avx2::sort_tiny_u32_keys_generic(slice) };
+        if slice.len() >= NETWORK_MIN && is_avx2_u32_type::<T>() {
+            unsafe { x86_64::avx2::sort_u32_keys_generic(slice) };
             return;
         }
     }
@@ -30,7 +37,7 @@ pub fn sort_tiny<T: SortableKey>(slice: &mut [T]) {
             return;
         }
     }
-    scalar::insertion_sort(slice);
+    scalar::comparison_sort(slice);
 }
 
 /// Sort a medium slice (17..=512) using the best available backend.
@@ -39,7 +46,7 @@ pub fn sort_small<T: SortableKey>(slice: &mut [T]) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_avx2_u32_type::<T>() {
-            unsafe { x86_64::avx2::sort_small_u32_keys_generic(slice) };
+            unsafe { x86_64::avx2::sort_u32_keys_generic(slice) };
             return;
         }
     }

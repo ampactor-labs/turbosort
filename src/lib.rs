@@ -54,8 +54,8 @@ pub use key::SortableKey;
 /// Sort a mutable slice of any [`SortableKey`] type in ascending order.
 ///
 /// Picks an algorithm by input size:
-/// - n ≤ 16: a sorting network for 4-byte keys on AVX2 or NEON, insertion
-///   sort otherwise
+/// - n ≤ 16: a sorting network for 4-byte keys on AVX2 (from 4 elements) or
+///   NEON, `core`'s unstable sort otherwise
 /// - 17 ≤ n ≤ 512: with AVX2 and a 4-byte key, register networks up to 128
 ///   elements and merged 128-element blocks above that; otherwise `core`'s
 ///   unstable sort

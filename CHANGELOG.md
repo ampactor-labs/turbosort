@@ -23,6 +23,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the README say.
 - `sort_parallel` below 131,072 elements ran the radix core directly, even
   for slices the networks handle; it now runs the serial `sort`.
+- Depending on the type and the calling code, the compiler inlined the
+  radix sort into `sort` and `sort_with_buffer`, and every call then probed
+  40 KiB or more of stack for its histograms before looking at the length,
+  even to sort two elements. The radix cores and the counting sort are no
+  longer inlined.
 
 ### Changed
 - AVX2, 4-byte keys, 129 to 512 elements: 128-element network blocks merged
@@ -55,13 +60,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `u64` keys holding small values skip most of the histogram work. 65,536
   `u64` with four distinct values went from 0.54x to 1.33x `sort_unstable`,
   and `u32` from 0.89x to 1.23x.
+- The AVX2 networks load keys straight into registers, with a masked load
+  for the last partial vector, and store them back in whole vectors and 16-,
+  8- and 4-byte pieces. 0.2.1 copied keys one at a time through a stack
+  buffer, and each vector load that overlapped those stores waited for them
+  to reach the cache. With the stack fix above, sorting distinct random `u32`
+  slices went from 1.82x to 7.55x `sort_unstable` at 8 elements, 3.77x to
+  12.4x at 16 and 1.65x to 4.62x at 17 on the VM.
+- On AVX2, slices of 2 and 3 four-byte keys use `core`'s sort instead of a
+  network, and lengths up to 16 without a network use `core`'s
+  `sort_unstable` instead of the crate's insertion sort.
 - The crate description no longer says "SIMD-accelerated radix sort": the
   radix passes are scalar; SIMD is in the small-slice networks and merges.
 
 ### Added
 - A `patterns` benchmark group: sorted, reversed, few-unique, pipe-organ,
   sawtooth and permutation inputs for `u32` and `u64` at 512 and 65,536.
-- Tests for the merge tier at every length from 129 to 512, the presorted
+- A `small_batches` benchmark group, which sorts many distinct short slices.
+  The single-input groups let the branch predictor learn their one input.
+- Tests for the AVX2 networks at every length up to 128 and with signed and
+  float keys, the merge tier at every length from 129 to 512, the presorted
   scan, the diverting digit choice and finishing scan, presorted input in
   every tier, and structured `u64` and `f64` inputs.
 - CI runs the test suite without default features and with only `alloc`,

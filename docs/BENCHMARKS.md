@@ -150,3 +150,24 @@ The existing groups, minus voracious and 10M. `u32`, `i32` and `f32` at 4K and u
 | `u64` | 128 | 795 ns | 680 ns | 0.89x | 1.07x |
 | `u64` | 4,096 | 65.7 µs | 39.1 µs | 0.63x | 1.18x |
 | `u64` | 1M | 31.8 ms | 21 ms | 0.65x | 0.90x |
+
+### Batches of short slices
+
+The groups above sort one input over and over, so at small sizes the branch predictor learns the comparisons that insertion sort and quicksort make, which flatters them. The `small_batches` group sorts 16,384 random `u32` cut into slices of one length, so every slice is new to the predictor. Each side is one run at 20 samples, with 0.2.1 at commit 0ccf74e as above:
+
+```sh
+cargo bench --bench sort_bench -- '^small_batches/' --sample-size 20 --warm-up-time 1 --measurement-time 3
+```
+
+| Slice length | `sort_unstable`, per slice | 0.2.1, per slice | Now, per slice | 0.2.1 vs `sort_unstable` | Now vs `sort_unstable` |
+| --- | --- | --- | --- | --- | --- |
+| 4 | 11.6 ns | 31.8 ns | 7.8 ns | 0.36x | 1.49x |
+| 8 | 51.5 ns | 32.0 ns | 6.8 ns | 1.82x | 7.55x |
+| 16 | 182 ns | 44.8 ns | 14.7 ns | 3.77x | 12.4x |
+| 17 | 196 ns | 120 ns | 42.3 ns | 1.65x | 4.62x |
+| 32 | 158 ns | 109 ns | 41.3 ns | 1.45x | 3.84x |
+| 64 | 379 ns | 161 ns | 103 ns | 2.20x | 3.68x |
+| 128 | 801 ns | 308 ns | 261 ns | 2.79x | 3.07x |
+| 512 | 4.58 µs | 5.22 µs | 1.90 µs | 0.84x | 2.41x |
+
+The `sort_unstable` column is from the run of the current code. Three changes account for the short lengths. The networks used to copy keys one at a time into a stack buffer and read it back with vector loads, and a vector load that overlaps several smaller stores waits for them to reach the cache; keys now go straight into registers. Depending on the type and the calling code, the compiler inlined the radix sort into `sort`, and then every call probed 40 to 48 KiB of stack for its histograms before looking at the length (0.2.1 did for `f32`; this branch did for `u32` before the fix); the radix cores are no longer inlined. And slices of 2 and 3 use insertion sort, which beats a network's fixed cost of about 7 ns there. At 512 the quicksort that 0.2.1 ran lost to `sort_unstable` on fresh inputs, although it won the single-input benchmark (1.46x above).

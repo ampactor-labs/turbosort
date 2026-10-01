@@ -110,6 +110,8 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
 /// Needs no scratch buffer, so it also serves `no_std` builds without
 /// `alloc`. Large inputs count into four interleaved histograms, like the
 /// radix passes, so runs of equal bytes do not serialize on one counter.
+/// Never inlined, for the same reason as [`sort_raw`].
+#[inline(never)]
 pub(crate) fn counting_sort<T: SortableKey>(slice: &mut [T]) {
     debug_assert_eq!(T::Key::BYTES, 1);
     let [counts] = if slice.len() >= INTERLEAVE_MIN {
@@ -132,10 +134,15 @@ pub(crate) fn counting_sort<T: SortableKey>(slice: &mut [T]) {
 /// `WIDE` permits the wide-digit path for 8-byte keys, which allocates its
 /// histograms on the heap; callers that must not allocate pass `false`.
 ///
+/// Never inlined: the cores keep up to 64 KiB of histograms on the stack, and
+/// a caller that inlined them would probe that much stack on every call, even
+/// to sort two elements.
+///
 /// # Safety
 ///
 /// `scratch` must be valid for `slice.len()` writes and must not alias `slice`.
 /// It may be uninitialized.
+#[inline(never)]
 unsafe fn sort_raw<T: SortableKey, const WIDE: bool>(slice: &mut [T], scratch: *mut T) {
     match T::Key::BYTES {
         2 => sort_core_bytes::<T, 2>(slice, scratch),

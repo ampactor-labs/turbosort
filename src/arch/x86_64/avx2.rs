@@ -138,45 +138,6 @@ unsafe fn sort_network_8(v: __m256i) -> __m256i {
     r
 }
 
-/// Sort up to 16 u32 elements using AVX2 sorting networks.
-///
-/// # Safety
-///
-/// Caller must ensure AVX2 is available (checked via `is_x86_feature_detected!`).
-#[target_feature(enable = "avx2")]
-pub unsafe fn sort_u32_16(slice: &mut [u32]) {
-    let len = slice.len();
-    debug_assert!(len <= 16);
-
-    if len <= 1 {
-        return;
-    }
-
-    if len <= 8 {
-        let mut buf = [u32::MAX; 8];
-        buf[..len].copy_from_slice(slice);
-        let v = _mm256_loadu_si256(buf.as_ptr() as *const __m256i);
-        let sorted = sort_network_8(v);
-        _mm256_storeu_si256(buf.as_mut_ptr() as *mut __m256i, sorted);
-        slice.copy_from_slice(&buf[..len]);
-    } else {
-        let mut buf_lo = [u32::MAX; 8];
-        let mut buf_hi = [u32::MAX; 8];
-        buf_lo.copy_from_slice(&slice[..8]);
-        let hi_len = len - 8;
-        buf_hi[..hi_len].copy_from_slice(&slice[8..]);
-
-        let mut lo = sort_network_8(_mm256_loadu_si256(buf_lo.as_ptr() as *const __m256i));
-        let mut hi = sort_network_8(_mm256_loadu_si256(buf_hi.as_ptr() as *const __m256i));
-        bitonic_merge_8x2(&mut lo, &mut hi);
-
-        _mm256_storeu_si256(buf_lo.as_mut_ptr() as *mut __m256i, lo);
-        _mm256_storeu_si256(buf_hi.as_mut_ptr() as *mut __m256i, hi);
-        slice[..8].copy_from_slice(&buf_lo);
-        slice[8..].copy_from_slice(&buf_hi[..hi_len]);
-    }
-}
-
 // ============================================================================
 // Multi-register bitonic networks (32/64/128 elements)
 //
@@ -320,58 +281,62 @@ unsafe fn sort_16regs(r: &mut [__m256i; 16]) {
     *b = hi;
 }
 
-/// Sort up to 128 u32 elements with padded bitonic networks.
-///
-/// Pads to the next network tier (16/32/64/128) with `u32::MAX`, which sorts
-/// past every real element and is discarded on the copy back.
-///
-/// # Safety
-///
-/// Caller must ensure AVX2 is available.
-#[target_feature(enable = "avx2")]
-pub unsafe fn sort_u32_128(slice: &mut [u32]) {
-    let len = slice.len();
+/// The register network size that holds `len` keys: 8, 16, 32, 64 or 128.
+#[inline]
+fn network_tier(len: usize) -> usize {
     debug_assert!(len <= 128);
+    len.max(8).next_power_of_two()
+}
 
-    if len <= 16 {
-        sort_u32_16(slice);
-        return;
+/// Sort `R` registers of keys, 8 to 128 keys, as one network tier.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn sort_regs<const R: usize>(r: &mut [__m256i; R]) {
+    match r.as_mut_slice() {
+        [v] => *v = sort_network_8(*v),
+        [lo, hi] => {
+            *lo = sort_network_8(*lo);
+            *hi = sort_network_8(*hi);
+            bitonic_merge_8x2(lo, hi);
+        }
+        r => match r.len() {
+            4 => sort_4regs(r.try_into().unwrap()),
+            8 => sort_8regs(r.try_into().unwrap()),
+            16 => sort_16regs(r.try_into().unwrap()),
+            n => unreachable!("not a network tier: {n} registers"),
+        },
     }
+}
 
-    let mut buf = [u32::MAX; 128];
-    buf[..len].copy_from_slice(slice);
-    let p = buf.as_mut_ptr() as *mut __m256i;
-
-    if len <= 32 {
-        let mut r = [_mm256_setzero_si256(); 4];
-        for (i, reg) in r.iter_mut().enumerate() {
-            *reg = _mm256_loadu_si256(p.add(i));
-        }
-        sort_4regs(&mut r);
-        for (i, reg) in r.iter().enumerate() {
-            _mm256_storeu_si256(p.add(i), *reg);
-        }
-    } else if len <= 64 {
-        let mut r = [_mm256_setzero_si256(); 8];
-        for (i, reg) in r.iter_mut().enumerate() {
-            *reg = _mm256_loadu_si256(p.add(i));
-        }
-        sort_8regs(&mut r);
-        for (i, reg) in r.iter().enumerate() {
-            _mm256_storeu_si256(p.add(i), *reg);
-        }
-    } else {
-        let mut r = [_mm256_setzero_si256(); 16];
-        for (i, reg) in r.iter_mut().enumerate() {
-            *reg = _mm256_loadu_si256(p.add(i));
-        }
-        sort_16regs(&mut r);
-        for (i, reg) in r.iter().enumerate() {
-            _mm256_storeu_si256(p.add(i), *reg);
-        }
+/// Sort a full network tier of keys (8, 16, 32, 64 or 128) in place.
+/// Padding with `u32::MAX` sorts past every real key.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn sort_padded(keys: &mut [u32]) {
+    match keys.len() {
+        8 => sort_block::<1>(keys),
+        16 => sort_block::<2>(keys),
+        32 => sort_block::<4>(keys),
+        64 => sort_block::<8>(keys),
+        128 => sort_block::<16>(keys),
+        n => unreachable!("not a network tier: {n}"),
     }
+}
 
-    slice.copy_from_slice(&buf[..len]);
+/// [`sort_padded`] for a tier of `R` registers.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn sort_block<const R: usize>(keys: &mut [u32]) {
+    debug_assert_eq!(keys.len(), 8 * R);
+    let p = keys.as_mut_ptr() as *mut __m256i;
+    let mut r = [_mm256_setzero_si256(); R];
+    for (i, reg) in r.iter_mut().enumerate() {
+        *reg = _mm256_loadu_si256(p.add(i));
+    }
+    sort_regs(&mut r);
+    for (i, reg) in r.iter().enumerate() {
+        _mm256_storeu_si256(p.add(i), *reg);
+    }
 }
 
 // ============================================================================
@@ -425,15 +390,18 @@ unsafe fn merge_runs(a: &[u32], b: &[u32], out: &mut [u32]) {
     _mm256_storeu_si256(out[o..o + 8].as_mut_ptr() as *mut __m256i, hi);
 }
 
-/// Sort 129..=512 keys whose count is a multiple of 8: 128-key blocks with
-/// the register networks, then pairwise merges through a stack buffer.
+/// Sort the first `n` keys of `buf`, 129 to 512 and a multiple of 8, where
+/// every key past `n` is `u32::MAX` padding: 128-key blocks with the register
+/// networks, sorted in place (the last block padded to its network tier),
+/// then pairwise merges through a stack buffer.
 #[target_feature(enable = "avx2")]
-unsafe fn sort_u32_512(keys: &mut [u32]) {
-    let n = keys.len();
+unsafe fn sort_u32_512(buf: &mut [u32; 512], n: usize) {
     debug_assert!(n > 128 && n <= 512 && n % 8 == 0);
-    for block in keys.chunks_mut(128) {
-        sort_u32_128(block);
+    for start in (0..n).step_by(128) {
+        let tier = network_tier((n - start).min(128));
+        sort_padded(&mut buf[start..start + tier]);
     }
+    let keys = &mut buf[..n];
     let mut tmp = [0u32; 512];
     if n <= 256 {
         merge_runs(&keys[..128], &keys[128..], &mut tmp[..n]);
@@ -468,97 +436,211 @@ pub fn is_available() -> bool {
     }
 }
 
-/// Copy the radix keys of `slice` into the front of `keys`.
+/// A 4-byte type's radix key transform as two constants: the key of the
+/// bits `x` is `x ^ a ^ (b & (x >> 31))`, with an arithmetic shift. `u32`
+/// has a = b = 0, `i32` flips the sign bit (a = 1 << 31), and `f32` also
+/// flips every other bit of negative values (b = !(1 << 31)). Both constants
+/// come from the scalar transform, so they cannot disagree with it, and fold
+/// to immediates.
 ///
 /// # Safety
 ///
-/// `T::Key` must be 4 bytes.
+/// `T` must be a 4-byte type for which every bit pattern is a valid value.
 #[inline(always)]
-unsafe fn load_keys<T: SortableKey>(slice: &[T], keys: &mut [u32]) {
-    debug_assert!(keys.len() >= slice.len());
-    for (k, elem) in keys.iter_mut().zip(slice) {
-        let key = elem.to_radix_key();
-        // SAFETY: T::Key is 4 bytes (caller contract), the same size as u32,
-        // so this reinterprets the key's bytes for SIMD sorting.
-        *k = core::ptr::read(&key as *const T::Key as *const u32);
-    }
+unsafe fn key_transform<T: SortableKey>() -> (u32, u32) {
+    let key_of = |bits: u32| -> u32 {
+        // SAFETY: T is 4 bytes and accepts any bits (caller contract), and
+        // T::Key is 4 bytes, so both reads reinterpret 4 initialized bytes.
+        let x: T = core::ptr::read(&bits as *const u32 as *const T);
+        let key = x.to_radix_key();
+        core::ptr::read(&key as *const T::Key as *const u32)
+    };
+    let a = key_of(0);
+    (a, key_of(u32::MAX) ^ !a)
 }
 
-/// Write the front of `keys` back into `slice` as values of `T`.
-///
-/// # Safety
-///
-/// `T::Key` must be 4 bytes, and every copied key must have come from
-/// [`load_keys`] (sorting only permutes them).
-#[inline(always)]
-unsafe fn store_keys<T: SortableKey>(keys: &[u32], slice: &mut [T]) {
-    for (elem, k) in slice.iter_mut().zip(keys) {
-        // SAFETY: the u32 was produced by to_radix_key, so it is a valid
-        // T::Key representation.
-        let key = core::ptr::read(k as *const u32 as *const T::Key);
-        *elem = T::from_radix_key(key);
-    }
-}
-
-/// Sort up to 16 elements of any 4-byte SortableKey type using AVX2.
-///
-/// Converts to u32 radix keys, sorts via SIMD network, converts back.
-///
-/// # Safety
-///
-/// Caller must ensure:
-/// - AVX2 is available
-/// - `T` and `T::Key` are both 4 bytes
+/// [`key_transform`]'s constants, broadcast.
+#[inline]
 #[target_feature(enable = "avx2")]
-pub unsafe fn sort_tiny_u32_keys_generic<T: SortableKey>(slice: &mut [T]) {
-    let len = slice.len();
-    debug_assert!(core::mem::size_of::<T>() == 4);
-    debug_assert!(core::mem::size_of::<T::Key>() == 4);
-    debug_assert!(len <= 16);
-    if len <= 1 {
+unsafe fn key_transform_8<T: SortableKey>() -> (__m256i, __m256i) {
+    let (a, b) = key_transform::<T>();
+    (_mm256_set1_epi32(a as i32), _mm256_set1_epi32(b as i32))
+}
+
+/// The keys of eight values' bits `x`, given [`key_transform_8`]'s constants.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn to_keys_8(x: __m256i, a: __m256i, b: __m256i) -> __m256i {
+    _mm256_xor_si256(
+        _mm256_xor_si256(x, a),
+        _mm256_and_si256(b, _mm256_srai_epi32::<31>(x)),
+    )
+}
+
+/// The bits of the values whose keys are `k`: the inverse of [`to_keys_8`].
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn from_keys_8(k: __m256i, a: __m256i, b: __m256i) -> __m256i {
+    // The key's top bit is the value's sign bit flipped.
+    _mm256_xor_si256(
+        _mm256_xor_si256(k, a),
+        _mm256_andnot_si256(_mm256_srai_epi32::<31>(k), b),
+    )
+}
+
+/// The keys of the first `n` values at `src`, all 8 if `n >= 8`, with
+/// `u32::MAX` padding in the lanes past them.
+///
+/// # Safety
+///
+/// `src` must be valid for reading `n.min(8)` values of a type that
+/// [`key_transform`] accepts.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn load_8_keys(src: *const __m256i, n: usize, a: __m256i, b: __m256i) -> __m256i {
+    if n >= 8 {
+        return to_keys_8(_mm256_loadu_si256(src), a, b);
+    }
+    let lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    let mask = _mm256_cmpgt_epi32(_mm256_set1_epi32(n as i32), lanes);
+    // A masked load reads only the lanes whose mask is set, so it never
+    // touches memory past the slice.
+    let x = _mm256_maskload_epi32(src as *const i32, mask);
+    let pad = _mm256_andnot_si256(mask, _mm256_set1_epi32(-1));
+    _mm256_or_si256(to_keys_8(x, a, b), pad)
+}
+
+/// Write the values whose keys are the first `n` lanes of `k`, all 8 if
+/// `n >= 8`, to `dst`.
+///
+/// A short tail goes out in 16-, 8- and 4-byte pieces. A masked store cannot
+/// forward its data, so a load that overlaps it soon after (the caller
+/// reading the sorted slice, or the load of an adjacent one) waits for it to
+/// reach the cache: sorting adjacent 4-key slices took 22 ns each with one
+/// and 9 ns without.
+///
+/// # Safety
+///
+/// `dst` must be valid for writing `n.min(8)` values, and the keys must have
+/// come from [`load_8_keys`] for the same type (sorting only permutes them).
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn store_8_keys(dst: *mut __m256i, n: usize, k: __m256i, a: __m256i, b: __m256i) {
+    let v = from_keys_8(k, a, b);
+    if n >= 8 {
+        _mm256_storeu_si256(dst, v);
         return;
     }
-
-    let mut keys = [0u32; 16];
-    load_keys(slice, &mut keys);
-    sort_u32_16(&mut keys[..len]);
-    store_keys(&keys, slice);
+    let mut out = dst as *mut __m128i;
+    let mut part = _mm256_castsi256_si128(v);
+    if n >= 4 {
+        _mm_storeu_si128(out, part);
+        out = (out as *mut u32).add(4) as *mut __m128i;
+        part = _mm256_extracti128_si256::<1>(v);
+    }
+    if n & 2 != 0 {
+        _mm_storel_epi64(out, part);
+        out = (out as *mut u32).add(2) as *mut __m128i;
+        part = _mm_srli_si128::<8>(part);
+    }
+    if n & 1 != 0 {
+        (out as *mut i32).write_unaligned(_mm_cvtsi128_si32(part));
+    }
 }
 
-/// Sort 17..=512 elements of any 4-byte SortableKey type using AVX2.
+/// Sort up to 512 elements of any 4-byte SortableKey type using AVX2.
 ///
 /// Up to 128 elements run the padded register networks; larger slices sort
-/// 128-element blocks and merge them. No pivots, so the cost does not depend
-/// on the input's order.
+/// 128-element blocks and merge them. Any length sorts correctly; the
+/// dispatcher sends slices of 4 or more. No pivots, so the cost does not
+/// depend on the input's order.
 ///
 /// # Safety
 ///
-/// Caller must ensure AVX2 is available and `T`/`T::Key` are 4 bytes.
+/// Caller must ensure AVX2 is available and `T`/`T::Key` are 4 bytes. The
+/// only such types, `u32`, `i32` and `f32`, accept every bit pattern, as
+/// [`key_transform`] requires.
 #[target_feature(enable = "avx2")]
-pub unsafe fn sort_small_u32_keys_generic<T: SortableKey>(slice: &mut [T]) {
+pub unsafe fn sort_u32_keys_generic<T: SortableKey>(slice: &mut [T]) {
     let len = slice.len();
     debug_assert!(core::mem::size_of::<T>() == 4);
     debug_assert!(core::mem::size_of::<T::Key>() == 4);
     debug_assert!(len <= 512);
 
-    if len <= 128 {
-        let mut keys = [0u32; 128];
-        load_keys(slice, &mut keys);
-        sort_u32_128(&mut keys[..len]);
-        store_keys(&keys, slice);
-    } else {
-        // Pad to a multiple of 8 for the merges. Padding keys sort after
-        // every real key, so they end up past `len` and are never copied out.
-        let mut keys = [u32::MAX; 512];
-        load_keys(slice, &mut keys);
-        sort_u32_512(&mut keys[..len.next_multiple_of(8)]);
-        store_keys(&keys, slice);
+    // Padding keys sort after every real key, so they end up past `len` and
+    // are never copied out. Each size class pads once, to what it sorts.
+    if len > 128 {
+        return sort_in_blocks(slice);
+    }
+    match network_tier(len) {
+        8 => sort_in_regs::<T, 1>(slice),
+        16 => sort_in_regs::<T, 2>(slice),
+        32 => sort_in_regs::<T, 4>(slice),
+        64 => sort_in_regs::<T, 8>(slice),
+        _ => sort_in_regs::<T, 16>(slice),
+    }
+}
+
+/// Sort at most `8 * R` keys as one network tier. The keys go from the slice
+/// into registers and back without passing through memory.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn sort_in_regs<T: SortableKey, const R: usize>(slice: &mut [T]) {
+    let len = slice.len();
+    debug_assert!(len <= 8 * R);
+    let (a, b) = key_transform_8::<T>();
+    let p = slice.as_mut_ptr() as *mut __m256i;
+    let mut r = [_mm256_set1_epi32(-1); R];
+    for (i, reg) in r.iter_mut().enumerate() {
+        if 8 * i < len {
+            *reg = load_8_keys(p.add(i), len - 8 * i, a, b);
+        }
+    }
+    sort_regs(&mut r);
+    for (i, reg) in r.iter().enumerate() {
+        if 8 * i < len {
+            store_8_keys(p.add(i), len - 8 * i, *reg, a, b);
+        }
+    }
+}
+
+/// Sort 129 to 512 keys through a padded buffer: 128-key network blocks,
+/// then merges.
+#[inline]
+#[target_feature(enable = "avx2")]
+unsafe fn sort_in_blocks<T: SortableKey>(slice: &mut [T]) {
+    let len = slice.len();
+    debug_assert!(len > 128 && len <= 512);
+    let (a, b) = key_transform_8::<T>();
+    let p = slice.as_mut_ptr() as *mut __m256i;
+    let mut keys = [u32::MAX; 512];
+    let buf = keys.as_mut_ptr() as *mut __m256i;
+    let vectors = len.div_ceil(8);
+    for i in 0..vectors {
+        _mm256_storeu_si256(buf.add(i), load_8_keys(p.add(i), len - 8 * i, a, b));
+    }
+    sort_u32_512(&mut keys, 8 * vectors);
+    let buf = keys.as_ptr() as *const __m256i;
+    for i in 0..vectors {
+        store_8_keys(p.add(i), len - 8 * i, _mm256_loadu_si256(buf.add(i)), a, b);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sort through the register network tier that holds `data`.
+    ///
+    /// # Safety
+    ///
+    /// AVX2 must be available.
+    unsafe fn sort_via_network(data: &mut [u32]) {
+        let mut buf = [u32::MAX; 128];
+        buf[..data.len()].copy_from_slice(data);
+        sort_padded(&mut buf[..network_tier(data.len())]);
+        data.copy_from_slice(&buf[..data.len()]);
+    }
 
     #[test]
     fn sort_network_8_basic() {
@@ -567,7 +649,7 @@ mod tests {
         }
         unsafe {
             let mut data = [5u32, 3, 8, 1, 9, 2, 7, 4];
-            sort_u32_16(&mut data);
+            sort_via_network(&mut data);
             assert_eq!(data, [1, 2, 3, 4, 5, 7, 8, 9]);
         }
     }
@@ -579,7 +661,7 @@ mod tests {
         }
         unsafe {
             let mut data = [5u32, 3, 1];
-            sort_u32_16(&mut data);
+            sort_via_network(&mut data);
             assert_eq!(data, [1, 3, 5]);
         }
     }
@@ -591,7 +673,7 @@ mod tests {
         }
         unsafe {
             let mut data = [16u32, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
-            sort_u32_16(&mut data);
+            sort_via_network(&mut data);
             assert_eq!(
                 data,
                 [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
@@ -606,7 +688,7 @@ mod tests {
         }
         unsafe {
             let mut data = [42u32; 8];
-            sort_u32_16(&mut data);
+            sort_via_network(&mut data);
             assert_eq!(data, [42; 8]);
         }
     }
@@ -618,7 +700,7 @@ mod tests {
         }
         unsafe {
             let mut data = [1u32, 2, 3, 4, 5, 6, 7, 8];
-            sort_u32_16(&mut data);
+            sort_via_network(&mut data);
             assert_eq!(data, [1, 2, 3, 4, 5, 6, 7, 8]);
         }
     }
@@ -630,7 +712,7 @@ mod tests {
         }
         unsafe {
             let mut data = [8u32, 7, 6, 5, 4, 3, 2, 1];
-            sort_u32_16(&mut data);
+            sort_via_network(&mut data);
             assert_eq!(data, [1, 2, 3, 4, 5, 6, 7, 8]);
         }
     }
@@ -648,12 +730,12 @@ mod tests {
             return;
         }
         let mut state = 0x853C49E6748FEA9Bu64;
-        for n in 17..=128usize {
+        for n in 0..=128usize {
             for _ in 0..20 {
                 let mut data: Vec<u32> = (0..n).map(|_| xorshift(&mut state) as u32).collect();
                 let mut expected = data.clone();
                 expected.sort_unstable();
-                unsafe { sort_u32_128(&mut data) };
+                unsafe { sort_u32_keys_generic(&mut data) };
                 assert_eq!(data, expected, "n={n}");
             }
         }
@@ -666,13 +748,13 @@ mod tests {
             return;
         }
         let mut state = 0xC0FFEE123456789u64;
-        for n in [17, 31, 32, 33, 63, 64, 65, 100, 127, 128] {
+        for n in [2, 7, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 100, 127, 128] {
             for _ in 0..500 {
                 let mut data: Vec<u32> =
                     (0..n).map(|_| (xorshift(&mut state) & 1) as u32).collect();
                 let mut expected = data.clone();
                 expected.sort_unstable();
-                unsafe { sort_u32_128(&mut data) };
+                unsafe { sort_u32_keys_generic(&mut data) };
                 assert_eq!(data, expected, "n={n}");
             }
         }
@@ -694,7 +776,7 @@ mod tests {
                 let mut data = case.clone();
                 let mut expected = case;
                 expected.sort_unstable();
-                unsafe { sort_u32_128(&mut data) };
+                unsafe { sort_u32_keys_generic(&mut data) };
                 assert_eq!(data, expected, "n={n}");
             }
         }
@@ -730,7 +812,7 @@ mod tests {
         let mut expected = data.clone();
         expected.sort_unstable();
         let mut sorted = data;
-        unsafe { sort_small_u32_keys_generic(&mut sorted) };
+        unsafe { sort_u32_keys_generic(&mut sorted) };
         assert_eq!(sorted, expected, "n={}", sorted.len());
     }
 
@@ -791,6 +873,68 @@ mod tests {
             for case in cases {
                 check_small(case);
             }
+        }
+    }
+
+    #[test]
+    fn key_transform_matches_the_scalar_keys() {
+        fn check<T: SortableKey>(values: &[T]) {
+            let (a, b) = unsafe { key_transform::<T>() };
+            for &v in values {
+                let x = unsafe { core::ptr::read(&v as *const T as *const u32) };
+                let key = v.to_radix_key();
+                let key = unsafe { core::ptr::read(&key as *const T::Key as *const u32) };
+                let sign = ((x as i32) >> 31) as u32;
+                assert_eq!(x ^ a ^ (b & sign), key, "bits {x:#010x}");
+            }
+        }
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let bits: Vec<u32> = [0, 1, 0x7FFF_FFFF, 0x8000_0000, 0x8000_0001, u32::MAX]
+            .into_iter()
+            .chain((0..1000).map(|_| xorshift(&mut state) as u32))
+            .collect();
+        check::<u32>(&bits);
+        check::<i32>(&bits.iter().map(|&x| x as i32).collect::<Vec<_>>());
+        check::<f32>(&bits.iter().map(|&x| f32::from_bits(x)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn signed_and_float_keys_at_every_length() {
+        // The vector key loads at every tail length, on the values whose keys
+        // the transform has to get right.
+        if !is_available() {
+            return;
+        }
+        let ints = [i32::MIN, -2, -1, 0, 1, 2, i32::MAX, i32::MIN + 1];
+        let floats = [
+            f32::NEG_INFINITY,
+            -1.5,
+            -0.0,
+            0.0,
+            f32::MIN_POSITIVE,
+            f32::INFINITY,
+            f32::NAN,
+            f32::from_bits(0xFFC0_0000), // a NaN with the sign bit set
+        ];
+        let mut state = 0x9E3779B97F4A7C15u64;
+        for n in (0..=40).chain([63, 64, 65, 127, 128, 129, 200, 511, 512]) {
+            let mut i: Vec<i32> = (0..n)
+                .map(|_| ints[(xorshift(&mut state) % 8) as usize])
+                .collect();
+            let mut f: Vec<f32> = (0..n)
+                .map(|_| floats[(xorshift(&mut state) % 8) as usize])
+                .collect();
+            let mut i_expected = i.clone();
+            i_expected.sort_unstable();
+            let mut f_expected = f.clone();
+            f_expected.sort_unstable_by(|x, y| x.total_cmp(y));
+            unsafe {
+                sort_u32_keys_generic(&mut i);
+                sort_u32_keys_generic(&mut f);
+            }
+            assert_eq!(i, i_expected, "i32 n={n}");
+            let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(&f), bits(&f_expected), "f32 n={n}");
         }
     }
 }

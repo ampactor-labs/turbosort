@@ -2,7 +2,8 @@
 //!
 //! Routes to the optimal algorithm based on input length:
 //! - 0-1: no-op
-//! - 2-16: sorting network or insertion sort ([`crate::tiny`])
+//! - 2-16: sorting networks for 4-byte keys (AVX2 from 4 elements, NEON),
+//!   `core`'s unstable sort otherwise ([`crate::tiny`])
 //! - 17-512: sorting networks and merges, or `core`'s unstable sort
 //!   ([`crate::small`])
 //! - >512: LSD radix sort ([`crate::radix`])

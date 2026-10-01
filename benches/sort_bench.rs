@@ -222,6 +222,33 @@ fn bench_patterns(c: &mut Criterion) {
     group.finish();
 }
 
+/// Many distinct short arrays per iteration. The groups above sort one input
+/// over and over, so the branch predictor learns it, which flatters
+/// insertion sort and quicksort at these lengths; this group times a batch
+/// of 16,384 random keys cut into slices of each size.
+fn bench_small_batches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("small_batches");
+    let data = gen_random_u32(16_384);
+    group.throughput(Throughput::Elements(data.len() as u64));
+    for &size in &[4usize, 8, 16, 17, 32, 64, 128, 512] {
+        group.bench_with_input(BenchmarkId::new("turbosort", size), &data, |b, data| {
+            b.iter_batched_ref(
+                || data.clone(),
+                |d| d.chunks_exact_mut(size).for_each(turbosort::sort),
+                criterion::BatchSize::LargeInput,
+            )
+        });
+        group.bench_with_input(BenchmarkId::new("std_unstable", size), &data, |b, data| {
+            b.iter_batched_ref(
+                || data.clone(),
+                |d| d.chunks_exact_mut(size).for_each(<[u32]>::sort_unstable),
+                criterion::BatchSize::LargeInput,
+            )
+        });
+    }
+    group.finish();
+}
+
 #[cfg(feature = "parallel")]
 fn bench_parallel_u32(c: &mut Criterion) {
     let mut group = c.benchmark_group("parallel/u32");
@@ -260,6 +287,7 @@ criterion_group!(
     bench_turbosort_f32,
     bench_turbosort_i32,
     bench_patterns,
+    bench_small_batches,
 );
 
 #[cfg(feature = "parallel")]
