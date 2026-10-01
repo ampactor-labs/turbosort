@@ -5,9 +5,9 @@
 [![Documentation](https://docs.rs/turbosort/badge.svg)](https://docs.rs/turbosort)
 [![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/turbosort.svg)](#license)
 
-A Rust crate that sorts slices of primitive numbers, switching to radix sort (which orders keys one digit at a time) above 512 elements. Short slices of 32-bit types go through sorting networks, fixed compare-and-swap sequences run with SIMD instructions that handle several values at once (AVX2 on x86, NEON on ARM). On an Intel i7-8665U it sorts random 32-bit integers 2.2 to 3.2 times as fast as the standard library's unstable sort, from 1M to 100M keys. On random 64-bit keys it is slower at every size measured.
+A Rust crate that sorts slices of primitive numbers, switching to radix sort (which orders keys one digit at a time) above 512 elements. Short slices of 32-bit types go through sorting networks, fixed compare-and-swap sequences run with SIMD instructions that handle several values at once (AVX2 on x86, NEON on ARM). On an Intel i7-8665U, release 0.2.1 sorted random 32-bit integers 2.2 to 3.2 times as fast as the standard library's unstable sort, from 1M to 100M keys. Random 64-bit keys are its weak spot: on a cloud VM the current code beats the standard library on them at 128 and 4K keys and loses at 1M. `sort_by_key` sorts any type by a key of one of those number types, stably.
 
-**Status: working.** Version 0.2.1 is on crates.io and the API can still change before 1.0; x86 CPUs without AVX2 run scalar code, because the planned SSE4.2 path is not written.
+**Status: working.** Version 0.2.1 is on crates.io, `master` carries unreleased changes ([CHANGELOG](CHANGELOG.md)), and the API can still change before 1.0; x86 CPUs without AVX2 run scalar code, because the planned SSE4.2 path is not written.
 
 Package: https://crates.io/crates/turbosort · Docs: https://docs.rs/turbosort
 
@@ -45,9 +45,14 @@ let mut data = [42u64, 7, 99, 1, 0];
 let mut buf = [0u64; 5];
 turbosort::sort_with_buffer(&mut data, &mut buf);
 assert_eq!(data, [0, 1, 7, 42, 99]);
+
+// Any type, by a key of one of the number types. Stable: equal keys keep their order.
+let mut people = vec![("bob", 31u32), ("alice", 25), ("carol", 31), ("dave", 25)];
+turbosort::sort_by_key(&mut people, |&(_, age)| age);
+assert_eq!(people, [("alice", 25), ("dave", 25), ("bob", 31), ("carol", 31)]);
 ```
 
-`sort` allocates one scratch buffer the length of the slice when it runs the radix sort on a type wider than one byte. `sort_with_buffer` uses the caller's buffer instead and panics if that buffer is shorter than the slice. For the multi-core sort, enable the `parallel` feature and call `turbosort::sort_parallel(&mut data)`:
+`sort` allocates one scratch buffer the length of the slice when it runs the radix sort on a type wider than one byte. `sort_with_buffer` uses the caller's buffer instead and panics if that buffer is shorter than the slice. `sort_by_key` needs the `alloc` feature; from 128 elements it allocates two arrays of 8 bytes per element (16 for 8-byte keys) and room for the elements. For the multi-core sort, enable the `parallel` feature and call `turbosort::sort_parallel(&mut data)`:
 
 ```toml
 [dependencies]
@@ -62,7 +67,7 @@ turbosort = { version = "0.2", features = ["parallel"] }
 | `alloc` | yes, through `std` | The scratch buffer that `sort` allocates for the radix sort |
 | `parallel` | no | `sort_parallel`, a multi-core radix sort on [rayon](https://crates.io/crates/rayon) |
 
-With `default-features = false` the crate is `no_std`. Call `sort_with_buffer` there: without `alloc`, `sort` falls back to a scalar quicksort above 512 elements (see [Limitations](#limitations)).
+With `default-features = false` the crate is `no_std`. Call `sort_with_buffer` there: without `alloc`, `sort` uses the comparison sort from `core` above 512 elements instead of the radix sort (see [Limitations](#limitations)).
 
 ### Supported types
 
@@ -75,38 +80,43 @@ With `default-features = false` the crate is `no_std`. Call `sort_with_buffer` t
 | Length | Algorithm |
 | --- | --- |
 | 0 to 1 | Nothing to do |
-| 2 to 16 | Sorting network: AVX2 on x86_64, NEON on aarch64 |
+| 2 to 16 | Sorting network: AVX2 on x86_64 from 4 elements, NEON on aarch64 |
 | 17 to 128 | Sorting networks padded to 32, 64 or 128 elements, built by merging sorted runs inside AVX2 registers |
-| 129 to 512 | Quicksort with an AVX2 partition step and the 128-element networks as leaves |
-| 513 and up | LSD radix sort, or a counting sort for `u8` and `i8` |
+| 129 to 512 | 128-element blocks sorted by those networks, then merged pairwise with an 8-wide AVX2 bitonic merge |
+| 513 and up | LSD radix sort |
 
-A sorting network is a fixed sequence of compare-and-swap steps, so it has no data-dependent branches and maps onto SIMD min and max instructions. The SIMD rows apply only to types with 4-byte keys (`u32`, `i32`, `f32`) on a CPU that has the instructions. Every other case uses insertion sort up to 16 elements and a scalar quicksort up to 512; on aarch64 that includes 17 to 512 elements, because NEON only covers the 16-element networks.
+A sorting network is a fixed sequence of compare-and-swap steps, so it has no data-dependent branches and maps onto SIMD min and max instructions. The merges do not depend on the data's order either, so in the SIMD rows every input pattern costs the same. Those rows apply only to types with 4-byte keys (`u32`, `i32`, `f32`) on a CPU that has the instructions. Every other case uses the standard library's `sort_unstable` (from `core`, so it allocates nothing), which runs an insertion sort up to 20 elements; so do slices of 2 and 3 on AVX2, and on aarch64 17 to 512 elements, because NEON only covers the 16-element networks. `u8` and `i8` switch to a counting sort at 48 elements.
+
+Above 16 elements, one scan first checks whether the slice is already in order (`src/presorted.rs`). An ascending slice returns after it and a descending one is reversed, which sorts it because equal keys are identical values for these types. Random input fails the check within a comparison or two; the rest of the scan runs in fixed blocks that the compiler vectorizes.
 
 Every comparison and every radix digit works on an unsigned integer key with the same order as the value (`src/key.rs`). Unsigned types use the value itself, signed types flip the sign bit, and floats flip the sign bit when positive and every bit when negative. The networks and radix passes only ever see unsigned integers.
 
 The radix sort works from the least significant digit (LSD) up. Each pass distributes the keys into 256 buckets by one byte and keeps their order within a bucket, so after the pass over the most significant byte the slice is sorted (`src/radix/`):
 
-- One scan checks whether the slice is already sorted, and a sorted slice returns after it.
-- One more scan builds the histograms for every pass at once. A pass where every key has the same digit is skipped, so keys whose high bytes never vary skip those passes.
+- A first scan finds the bytes that vary at all; it stops within the first few dozen keys when every byte does, as with random keys. One more scan builds the histograms of the varying bytes at once. Constant bytes get neither a histogram nor a pass, so a `u64` slice of small values pays for its one or two varying bytes, not for eight.
 - The scratch buffer that `sort` allocates is never zeroed, because every scatter pass writes every position.
-- For 8-byte keys (`u64`, `i64`, `f64`) of 65,536 elements or more, `sort` uses 11-bit digits: six passes instead of eight. That made 1M-element `u64` 1.4x faster than the byte path, and 8-, 13- and 16-bit digits were measured and lost ([CHANGELOG](CHANGELOG.md), 0.2.0). `sort_with_buffer` stays on byte digits, because the wide path allocates its histograms.
+- When a pass's buckets are many and nearly equal in size, as in a permutation of 0..n, the plain scatter's 256 write positions sit at the same offsets within their pages and contend for a few cache sets. Those passes stage each bucket's keys in a 64-byte line and write whole, aligned lines (`src/radix/scatter.rs`). Random keys never take this path; the 11-bit path below does not have it.
+- For 8-byte keys (`u64`, `i64`, `f64`) of 65,536 elements or more, `sort` uses 11-bit digits: six passes instead of eight. That made 1M-element `u64` 1.4x faster than the byte path in 0.2.0, and 8-, 13- and 16-bit digits were measured and lost ([CHANGELOG](CHANGELOG.md), 0.2.0). `sort_with_buffer` stays on byte digits, because the wide path allocates its histograms.
+- Wide keys divert (`src/radix/divert.rs`). When the top digits alone carry log2(n) + 2 bits, as they do for random 64-bit keys, only those digits are radix-sorted; one scan then sorts each run of keys that agree on them, by insertion sort up to 16 keys. At 1M random `u64`, `sort` runs three of its six 11-bit passes and `sort_with_buffer` three of its eight byte passes. The digit count comes from the histograms; if it is too optimistic, the runs come out longer and the scan sorts them with `sort_unstable`. Diverting only happens when it skips at least three digits, which in practice means 8-byte keys.
 
-`sort_parallel` hands slices of 131,072 elements or more to rayon and runs the serial radix sort below that (`src/parallel.rs`). One parallel scan builds per-chunk histograms for every pass, and the first pass reuses them as its scatter offsets. Each thread then scatters its chunk into its own ranges of the destination, so no locks or atomics are needed. A fused variant that built the next pass's histograms during the scatter measured slower and was dropped; the module docs record why.
+`sort_by_key` (`src/by_key.rs`) calls the key function once per element and radix-sorts the keys together with each element's position. The passes cover only the key bytes that vary and keep equal keys in position order, which makes the sort stable, and wide keys divert as above, with each run finished by key and position. The elements are then moved into place through a buffer, so they can be any type. Sorted input returns after one scan of the keys, and reversed input is reversed with each run of equal keys put back in order. Below 128 elements it is the standard library's stable `sort_by_key`.
+
+`sort_parallel` hands slices of 131,072 elements or more to rayon and runs the serial `sort` below that (`src/parallel.rs`). Like the serial sort it counts only the digits that vary and diverts wide keys, splitting the finishing scan across threads at run boundaries; it does not combine writes. One parallel scan builds per-chunk histograms for every pass, and the first pass reuses them as its scatter offsets. Each thread then scatters its chunk into its own ranges of the destination, so no locks or atomics are needed. A fused variant that built the next pass's histograms during the scatter measured slower and was dropped; the module docs record why.
 
 ### Architecture support
 
 | Arch | SIMD | What it covers |
 | --- | --- | --- |
-| x86_64 | AVX2 | Networks up to 128 elements, SIMD partition up to 512 |
+| x86_64 | AVX2 | Networks up to 128 elements, networks and merges up to 512 |
 | x86_64 | SSE4.2 | Planned; no code yet |
 | aarch64 | NEON | Networks up to 16 elements |
-| Other | none | Insertion sort and scalar quicksort, the same radix sort |
+| Other | none | `core`'s `sort_unstable`, the same radix sort |
 
-On x86_64 the crate detects AVX2 at runtime through CPUID when the `std` feature is on, so one binary runs on any x86_64 CPU. NEON is part of every aarch64 CPU, so it needs no check.
+On x86_64 the crate detects AVX2 at runtime through CPUID when the `std` feature is on, so one binary runs on any x86_64 CPU. Without `std` it uses AVX2 only if the build enables it. NEON is part of every aarch64 CPU, so it needs no check.
 
 ## Benchmarks
 
-The tables come from one criterion run on an Intel i7-8665U (4 cores, 8 threads, AVX2, 8 MB L3, a 15 W laptop chip) at 30 samples per point, with the three sorts measured back to back at each size. The data is random from a fixed seed (`benches/sort_bench.rs`): `u32`, `u64` and `i32` over their full range, `f32` uniform in [-1e6, 1e6). The baselines are the standard library's `sort_unstable` (`sort_unstable_by` with `partial_cmp` for `f32`) and `voracious_sort` from voracious_radix_sort 1.2.0. Each ratio is the other sort's time divided by turbosort's, so values below 1 are losses. Absolute times swing with the chip's thermal state; the ratios within the run are the stable signal. This command runs the same benchmarks at the same sample count:
+The tables come from one criterion run of release 0.2.1 on an Intel i7-8665U (4 cores, 8 threads, AVX2, 8 MB L3, a 15 W laptop chip) at 30 samples per point, with the three sorts measured back to back at each size. The data is random from a fixed seed (`benches/sort_bench.rs`): `u32`, `u64` and `i32` over their full range, `f32` uniform in [-1e6, 1e6). The baselines are the standard library's `sort_unstable` (`sort_unstable_by` with `partial_cmp` for `f32`) and `voracious_sort` from voracious_radix_sort 1.2.0. Each ratio is the other sort's time divided by turbosort's, so values below 1 are losses. Absolute times swing with the chip's thermal state; the ratios within the run are the stable signal. This command runs the same benchmarks at the same sample count:
 
 ```sh
 cargo bench --bench sort_bench --features parallel -- --sample-size 30
@@ -145,11 +155,48 @@ Parallel `u32`, with `sort_parallel` against the serial `sort` and the standard 
 | 1M | 23.5 ms | 8.60 ms | 8.36 ms | 2.81x | 1.03x |
 | 10M | 270 ms | 116 ms | 73.4 ms | 3.67x | 1.58x |
 
-In 0.1.x, before the register networks, the 17 to 512 range ran at 0.69x of the standard library's speed at 128 elements and 0.67x at 512 ([CHANGELOG](CHANGELOG.md), 0.2.0). Random `u64` loses at all three sizes: 64-bit keys get no SIMD code below 513 elements, run eight byte passes at 4K and six 11-bit passes at 1M. For `u64`, voracious 1.2.0 hands slices under 350 elements to `sort_unstable`, which is why the two tie at 128, and runs its diverting LSD radix sort above that. The parallel sort's setup cancels its gain at 1M; at 10M it reaches 1.58x over serial on four cores.
+In 0.1.x, before the register networks, the 17 to 512 range ran at 0.69x of the standard library's speed at 128 elements and 0.67x at 512 ([CHANGELOG](CHANGELOG.md), 0.2.0). In 0.2.1 random `u64` lost at all three sizes: 64-bit keys got no SIMD code below 513 elements and ran eight byte passes at 4K and six 11-bit passes at 1M. For `u64`, voracious 1.2.0 hands slices under 350 elements to `sort_unstable`, which is why the two tie at 128, and runs its diverting LSD radix sort above that; turbosort now diverts too ([Since 0.2.1](#since-021)). The parallel sort's setup cancels its gain at 1M; at 10M it reaches 1.58x over serial on four cores.
 
 A `perf` profile of `examples/profile.rs` on the same chip, sorting 10M random `u32` and `f32` thirty times each, recorded 73% of cycles in the scatter passes and 22% in the histogram scans ([CHANGELOG](CHANGELOG.md), 0.2.1). A `perf stat` sweep measured turbosort at 2.8x, 2.2x and 3.2x the speed of `sort_unstable` on 1M, 10M and 100M random `u32`. At 1M the data and scratch (8 MB together) partly fit in the 8 MB L3, so only a third of keys miss the cache; from 10M up every key costs about one miss. [docs/BENCHMARKS.md](docs/BENCHMARKS.md) has the counters and the commands. The committed flamegraph does not show the cycle split, because no turbosort function appears in it.
 
 A second machine did not reproduce the large-array margins. On a shared cloud VM (4 vCPUs of an Intel Xeon at 2.8 GHz), short runs of the same benchmarks matched the 4K ratios (`u32` 1.61x, `u64` 0.71x against `sort_unstable`), while random `u64` at 1M ran at 0.30x to 0.32x and random `u32` at 1M ranged from 1.62x to 0.86x across three runs. The runs and their commands are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md#a-second-machine).
+
+### Since 0.2.1
+
+The unreleased changes on `master` have not been measured on the laptop. On a cloud VM (a KVM guest with 4 vCPUs of an Intel Xeon at 2.1 GHz, Rust 1.97.0), criterion runs of the same benchmark file before the changes (commit 0ccf74e, with the new `patterns` group copied in) and after gave these speeds relative to `sort_unstable`, each from one run at 20 samples per point:
+
+| Input | Size | 0.2.1 | now |
+| --- | --- | --- | --- |
+| `u32`, sorted | 512 | 0.05x | 2.98x |
+| `u32`, reversed | 512 | 0.05x | 1.91x |
+| `u32`, four distinct values | 512 | 0.06x | 0.84x |
+| `u32`, sawtooth | 512 | 0.11x | 1.78x |
+| `u32`, pipe organ | 512 | 0.52x | 2.25x |
+| `u32`, random | 512 | 1.46x | 2.15x |
+| `u64`, four distinct values | 512 | 0.05x | 1.05x |
+| `u64`, pipe organ | 512 | 0.10x | 1.03x |
+| `u32`, reversed | 65,536 | 0.04x | 1.67x |
+| `u64`, reversed | 65,536 | 0.03x | 1.27x |
+| `u64`, random | 128 | 0.89x | 1.07x |
+| `u64`, random | 4,096 | 0.63x | 1.18x |
+| `u64`, random | 1M | 0.65x | 0.90x |
+
+The 17 to 512 rows changed because the two quicksorts are gone, the reversed rows because one scan now finishes presorted input, and the random `u64` rows because the radix sort diverts. Random `u32` from 4K to 1M did not change. [docs/BENCHMARKS.md](docs/BENCHMARKS.md#since-021) has every row with its times and the commands.
+
+Those benchmarks sort one input over and over, which lets the branch predictor learn insertion sort's and quicksort's comparisons at small sizes. Sorting 16,384 random `u32` cut into slices, so that every slice is new (the `small_batches` group), gave these speeds relative to `sort_unstable` on the same slices:
+
+| Slice length | 0.2.1 | now | now, per slice |
+| --- | --- | --- | --- |
+| 4 | 0.36x | 1.49x | 7.8 ns |
+| 8 | 1.82x | 7.55x | 6.8 ns |
+| 16 | 3.77x | 12.4x | 14.7 ns |
+| 17 | 1.65x | 4.62x | 42.3 ns |
+| 64 | 2.20x | 3.68x | 103 ns |
+| 512 | 0.84x | 2.41x | 1.90 µs |
+
+Below 17 elements, 0.2.1 lost most of its time outside the network itself: it copied keys into a stack buffer one at a time and read them back with vector loads, which wait for such stores to reach the cache, and in some builds every call probed 40 KiB of stack for the radix sort's histograms. Neither happens now ([docs/BENCHMARKS.md](docs/BENCHMARKS.md#batches-of-short-slices)).
+
+`sort_by_key` has no 0.2.1 counterpart. Against the standard library's stable `sort_by_key` on 32-byte records with random keys (the `by_key` group), it ran 1.84x, 2.97x and 1.32x as fast at 1,000, 65,536 and 1M records keyed by `u32`, and 1.28x, 2.01x and 0.95x keyed by `u64` ([docs/BENCHMARKS.md](docs/BENCHMARKS.md#sort_by_key)).
 
 ## Testing
 
@@ -158,26 +205,30 @@ cargo test                           # unit tests, tests/correctness.rs and the 
 cargo test --release --all-features  # the same plus the parallel tests, optimized
 ```
 
-With default features on x86_64, `cargo test` runs 78 tests: 24 unit tests, 48 in `tests/correctness.rs` and 6 doctests, one of which is this README (`src/lib.rs` includes it). `--all-features` adds six `sort_parallel` tests at 300,000 elements and the `sort_parallel` doctest. In a debug build the proptest cases dominate: on a shared 4-vCPU Xeon VM the integration suite took 277 and 93 seconds in two debug runs, against 17 and 7 seconds with `--release`.
+With default features on x86_64, `cargo test` runs 113 tests: 49 unit tests, 57 in `tests/correctness.rs` and 7 doctests, one of which is this README (`src/lib.rs` includes it when the `alloc` feature is on). `--all-features` adds nine `sort_parallel` tests, eight of them at 300,000 elements, and the `sort_parallel` doctest. In a debug build the proptest cases dominate: on the 2.1 GHz cloud VM the integration suite took 56 seconds, against about 5 seconds with `--release`.
 
-- `tests/correctness.rs` checks every permutation of up to 8 `u8` and 6 `i8` values; the lengths around the switch points (0 to 3, 15 to 17, 128, 511 to 513, 1024 and 4096); `sort_with_buffer` on 70,000 and 200,000 random `u64`; float and signed edge cases; sorted, reversed, pipe-organ, sawtooth, few-unique and median-of-three-killer inputs up to 200,000 elements; and 2,000 proptest cases per type for each of three length ranges (0 to 16, 17 to 512, 513 to 10,000), compared with the standard library's `sort_by` on the same key order.
-- The unit tests cover the key transforms, each radix core called directly at sizes Miri can run, the AVX2 networks at every length from 17 to 128 with random, structured and random 0-1 inputs, and, on aarch64, the NEON networks against every 0-1 input up to 16 elements. By the 0-1 principle, a sorting network that sorts every input of zeros and ones sorts every input.
+- `tests/correctness.rs` checks every permutation of up to 8 `u8` and 6 `i8` values; the lengths around the switch points (0 to 3, 15 to 17, 128, 511 to 513, 1024 and 4096); `sort_with_buffer` on 70,000 and 200,000 random `u64`; structured `u64` (cleared high bits, a split top bit, correlated top bytes, 1,000 distinct values, a heavy tail) through `sort` and `sort_with_buffer` at the same sizes; float and signed edge cases; sorted, reversed, pipe-organ, sawtooth, few-unique and median-of-three-killer inputs up to 200,000 elements, and descending input with duplicates in every tier; 2,000 proptest cases per type for each of three length ranges (0 to 16, 17 to 512, 513 to 10,000); 500 cases each of structured `u64` and `f64` inputs; and 500 cases each of `sort_by_key` with `u32`, `u64` and `f64` keys, compared element for element with the standard library's stable sort. Results are compared with the standard library's sort on the same key order.
+- The unit tests cover the key transforms, including the float keys' order against `total_cmp` on random bit patterns; each radix core called directly at sizes Miri can run, including diverting on random, correlated and duplicate keys; the diverting digit choice and its finishing scan; both output methods of the counting sort; the presorted scan around its block boundaries; the AVX2 networks at every length up to 128, with signed and float keys at every tail length, and the network-and-merge tier at every length from 129 to 512, with random, structured and random 0-1 inputs; the bitonic merge at every pair of run lengths up to 96; `sort_by_key` against the standard library's stable sort for every key type, with ordered input, elements that are not `Copy`, and a long run left after diverting that only a stable finish keeps in order; and, on aarch64, the NEON networks against every 0-1 input up to 16 elements. By the 0-1 principle, a sorting network that sorts every input of zeros and ones sorts every input.
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on pushes to master and on pull requests. It checks formatting, runs `cargo clippy --all-features -- -D warnings` and `cargo test --all-features` on ubuntu-latest and macos-latest (an Apple Silicon runner, so the NEON code runs natively), builds without default features for `thumbv7em-none-eabihf` and with only `alloc`, runs clippy for that target and for `aarch64-unknown-linux-gnu`, builds on the 1.75 minimum supported Rust version, builds the docs the way docs.rs does, and runs `cargo publish --dry-run --locked`. Miri, an interpreter that detects undefined behaviour in unsafe code, runs the unit tests and the boundary tests on x86_64, which covers the raw-pointer scatter into uninitialized scratch. It runs the unit tests again for aarch64, which checks the NEON networks on a machine without NEON.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs on pushes to master and on pull requests. It checks formatting, runs `cargo clippy --all-features --all-targets -- -D warnings` and `cargo test --all-features` on ubuntu-latest and macos-latest (an Apple Silicon runner, so the NEON code runs natively), builds without default features for `thumbv7em-none-eabihf` and with only `alloc`, runs the test suite in both of those configurations on x86_64 (where, without `std`, AVX2 detection is off, so these runs also cover the scalar small sorts) and once more without `std` but with AVX2 enabled at compile time, runs clippy for `thumbv7em-none-eabihf` and `aarch64-unknown-linux-gnu`, builds on the 1.75 minimum supported Rust version, builds the docs the way docs.rs does, and runs `cargo publish --dry-run --locked`. Miri, an interpreter that detects undefined behaviour in unsafe code, runs the unit tests and the boundary tests on x86_64, which covers the raw-pointer scatter into uninitialized scratch. It runs the unit tests again for aarch64, which checks the NEON networks on a machine without NEON. The release workflow runs the tests once more before it publishes, and authenticates to crates.io through Trusted Publishing once that is configured there, with the stored token as a fallback.
 
 Miri reports AVX2 as unavailable, so the AVX2 code never runs under it, and the Miri jobs build without the `parallel` feature, so Miri does not check `sort_parallel` either. The AVX2 0-1 tests sample random inputs and do not cover all of them. No CI job measures speed, so a performance regression would pass.
 
 ## Limitations
 
-The published speedups were measured on one laptop chip, an Intel i7-8665U, and a second machine did not reproduce them for large arrays. On the laptop, random 64-bit keys ran at 0.84x of the standard library's speed at 128 elements, 0.71x at 4K and 0.77x at 1M, and voracious, another Rust radix sort, beat turbosort at all three sizes. On a shared cloud VM, 1M random 64-bit keys ran at 0.30x to 0.32x, and 1M random 32-bit keys ranged from 1.62 times as fast as the standard library to 0.86 times its speed across three runs. For large arrays of random 64-bit keys, use voracious or the standard library.
+The published speedups were measured on one laptop chip, an Intel i7-8665U, for release 0.2.1, and a second machine did not reproduce them for large arrays. Random 64-bit keys are the weak spot. In 0.2.1 they ran at 0.84x of the standard library's speed at 128 elements, 0.71x at 4K and 0.77x at 1M on the laptop, and voracious, another Rust radix sort, beat turbosort at all three sizes; on a shared cloud VM, 1M of them ran at 0.30x to 0.32x. The current code, on another cloud VM, reaches 1.07x at 128 and 1.18x at 4K but 0.90x at 1M. For large arrays of random 64-bit keys, measure voracious and the standard library against it.
 
-- x86 CPUs without AVX2 get insertion sort and a scalar quicksort below 513 elements, because the planned SSE4.2 path is not written. Above 512 elements every CPU runs the same scalar radix sort.
-- AVX2 detection needs the `std` feature, so a `no_std` build on x86_64 never uses AVX2.
-- Without the `alloc` feature, `sort` falls back to a scalar quicksort above 512 elements, and that quicksort goes quadratic on some inputs: 80,000 `u32` with the minimum at both ends took 1.23 s on the cloud VM, against 5.5 ms with the minimum elsewhere and 0.76 ms through `sort_with_buffer`. Use `sort_with_buffer` in `no_std` code.
-- `sort_with_buffer` never allocates, so 8-byte keys stay on eight byte passes there, and large 8-byte inputs use up to 64 KiB of stack for histograms.
-- It sorts the ten primitive number types only. There is no comparator or key function, so it cannot sort structs or sort by a field, and `usize`, `isize`, `u128` and `i128` are not supported.
+- x86 CPUs without AVX2 get `core`'s `sort_unstable` below 513 elements, because the planned SSE4.2 path is not written. Above 512 elements every CPU runs the same scalar radix sort.
+- AVX2 detection needs the `std` feature. A `no_std` build on x86_64 uses AVX2 only when it is compiled with AVX2 enabled (`-C target-feature=+avx2`, or a `target-cpu` that has it), which makes the binary require it.
+- Without the `alloc` feature, `sort` uses `core`'s `sort_unstable` above 512 elements (and the counting sort for `u8` and `i8`): O(n log n) on every input, but no radix sort. Use `sort_with_buffer` in `no_std` code.
+- `sort_with_buffer` never allocates, so 8-byte keys stay on byte digits there. On skewed keys that cannot divert, that is up to 2x slower than `sort`'s 11-bit digits. Large 8-byte inputs use up to 64 KiB of stack for histograms, and passes that combine writes 16 KiB more.
+- 8-byte keys of 65,536 elements or more take the 11-bit path, which does not combine writes, so inputs that fill every bucket equally keep running slower than random keys there: a random permutation of 65,536 `u64` ran at 1.04x of `sort_unstable` in the `patterns` benchmark. Handing such input to the byte path paid off for pipe organs but not for permutations in measurements on the cloud VM.
+- Few distinct values whose bytes all vary (four random `u64` values repeated, say) still cost a full radix sort: 65,536 such keys ran at 0.14x of `sort_unstable` on the cloud VM, because the standard library partitions equal keys away. Small distinct values are fine, because their high bytes are constant: four distinct values in the `patterns` benchmark ran at 1.23x (`u32`) and 1.33x (`u64`).
+- `sort` takes the ten primitive number types only; `sort_by_key` sorts other types by a key of one of them. There is no comparator, and `usize`, `isize`, `u128` and `i128` are not supported, as values or as keys.
+- `sort_by_key` beats the standard library's stable `sort_by_key` on random keys up to tens of thousands of records, but on the cloud VM it ran at 0.95x for a million records with 8-byte keys, 0.6x to 0.9x on few distinct keys at some sizes, and 0.4x to 0.8x on input already sorted or reversed, which it finishes in linear time.
 - A NaN's sign bit decides where it sorts. `f32::NAN` sorts last, but on x86_64 a NaN produced by an invalid operation (`0.0 / 0.0` gives `0xffc00000`) has the sign bit set and sorts first.
 - `sort` is not a stable sort. For these types equal keys are identical bit patterns, so the order of equal elements cannot be observed.
+- The `parallel` feature depends on rayon, whose releases from 1.11 on need Rust 1.80. CI builds it on Rust 1.75 against the lockfile's rayon 1.10; on Rust 1.75 to 1.79, pin it with `cargo update -p rayon --precise 1.10.0`.
 
 ## License
 

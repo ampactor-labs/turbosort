@@ -1,8 +1,10 @@
-//! SIMD-accelerated radix sort for primitive types.
+//! Radix sort for primitive types, with SIMD sorting networks for short slices.
 //!
-//! `turbosort` provides O(n) LSD radix sort with SIMD acceleration for the 10
-//! primitive numeric types: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`,
-//! `i64`, `f32`, `f64`.
+//! `turbosort` sorts slices of the 10 primitive numeric types (`u8`, `u16`,
+//! `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`) with an O(n) LSD
+//! radix sort above 512 elements, and with AVX2 or NEON sorting networks
+//! below that for 4-byte types. With the `alloc` feature, `sort_by_key`
+//! sorts any type by a key of one of those types, stably.
 //!
 //! # Features
 //!
@@ -27,7 +29,10 @@
 //! assert_eq!(data, [1, 3, 5, 8, 9]);
 //! ```
 
-#![cfg_attr(not(feature = "std"), no_std)]
+// Unit tests link std in every configuration. Without the `std` feature
+// there is no AVX2 detection, so on x86 those runs cover the scalar paths
+// unless the build enables AVX2 itself.
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(missing_docs)]
 #![warn(missing_debug_implementations)]
@@ -38,11 +43,12 @@ extern crate alloc;
 pub mod key;
 
 mod arch;
+#[cfg(feature = "alloc")]
+mod by_key;
 mod dispatch;
-#[cfg(target_arch = "x86_64")]
-mod lut;
 #[cfg(feature = "parallel")]
 mod parallel;
+mod presorted;
 mod radix;
 mod small;
 mod tiny;
@@ -51,14 +57,20 @@ pub use key::SortableKey;
 
 /// Sort a mutable slice of any [`SortableKey`] type in ascending order.
 ///
-/// Automatically selects the optimal algorithm based on input size:
-/// - n ≤ 16: sorting network
-/// - 17 ≤ n ≤ 512: SIMD sorting networks up to 128 elements, then quicksort
-///   with network leaves (scalar quicksort without AVX2)
-/// - n > 512: LSD radix sort (requires `alloc` feature); already-sorted
-///   inputs are detected in one scan and returned unchanged
+/// Picks an algorithm by input size:
+/// - n ≤ 16: a sorting network for 4-byte keys on AVX2 (from 4 elements) or
+///   NEON, `core`'s unstable sort otherwise
+/// - 17 ≤ n ≤ 512: with AVX2 and a 4-byte key, register networks up to 128
+///   elements and merged 128-element blocks above that; otherwise `core`'s
+///   unstable sort
+/// - n > 512: LSD radix sort (requires `alloc` feature)
 ///
-/// Without the `alloc` feature, arrays > 512 elements fall back to quicksort.
+/// Above 16 elements, input that is already sorted, ascending or descending,
+/// is detected in one scan and finished without sorting, and `u8`/`i8` use a
+/// counting sort from 48 elements.
+///
+/// Without the `alloc` feature, arrays over 512 elements use `core`'s
+/// unstable sort, which needs no scratch memory.
 ///
 /// # Examples
 ///
@@ -68,12 +80,16 @@ pub use key::SortableKey;
 /// assert_eq!(v, vec![-9, -1, -1, 3, 4, 5]);
 /// ```
 ///
+/// Floats sort in the order of `f32::total_cmp`. `f32::NAN` has its sign bit
+/// clear and sorts last; a NaN with the sign bit set (on x86, `0.0 / 0.0`
+/// computed at run time gives one) sorts first.
+///
 /// ```
 /// let mut v = vec![1.0f32, f32::NAN, -0.0, 0.0, f32::NEG_INFINITY];
 /// turbosort::sort(&mut v);
 /// assert_eq!(v[0], f32::NEG_INFINITY);
 /// assert!(v[1].to_bits() == (-0.0f32).to_bits()); // -0.0 < +0.0
-/// assert!(v[4].is_nan()); // NaN sorted to end
+/// assert!(v[4].is_nan()); // f32::NAN is a positive NaN
 /// ```
 #[inline]
 pub fn sort<T: SortableKey>(slice: &mut [T]) {
@@ -103,10 +119,41 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
     dispatch::sort_with_buffer(slice, buffer);
 }
 
+/// Sort a slice by a key, keeping elements with equal keys in their original
+/// order (a stable sort).
+///
+/// `key` returns one of the [`SortableKey`] types, and the elements can be
+/// any type: they are only moved, never copied or cloned. From 256 elements
+/// `key` is called once per element, the keys are radix-sorted together with
+/// each element's position, and the elements are then moved into order
+/// through a buffer. Below that this is the standard library's stable
+/// `sort_by_key`, which calls `key` on every comparison.
+///
+/// Requires the `alloc` feature. From 256 elements it allocates two arrays
+/// of 8 bytes per element (16 for 8-byte keys) and room for the elements.
+///
+/// # Examples
+///
+/// ```
+/// let mut people = vec![("bob", 31u32), ("alice", 25), ("carol", 31), ("dave", 25)];
+/// turbosort::sort_by_key(&mut people, |&(_, age)| age);
+/// assert_eq!(people, [("alice", 25), ("dave", 25), ("bob", 31), ("carol", 31)]);
+/// ```
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+#[inline]
+pub fn sort_by_key<T, K, F>(slice: &mut [T], key: F)
+where
+    K: SortableKey,
+    F: FnMut(&T) -> K,
+{
+    by_key::sort_by_key(slice, key);
+}
+
 /// Sort a mutable slice using parallel LSD radix sort.
 ///
-/// Uses rayon to distribute work across multiple cores. Falls back to
-/// single-threaded radix sort for arrays below 131K elements.
+/// Uses rayon to distribute work across multiple cores. Below 131,072
+/// elements it runs the serial [`sort`] instead.
 ///
 /// Requires the `parallel` feature.
 ///
@@ -131,7 +178,8 @@ where
 }
 
 /// Compiles every Rust code block in the README under `cargo test`, so a
-/// drifting example fails the build instead of misleading a reader.
-#[cfg(doctest)]
+/// drifting example fails the build instead of misleading a reader. Only
+/// with `alloc`, which the README's `sort_by_key` example needs.
+#[cfg(all(doctest, feature = "alloc"))]
 #[doc = include_str!("../README.md")]
 struct ReadmeDoctests;

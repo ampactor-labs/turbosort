@@ -1,9 +1,6 @@
-//! x86_64 SIMD backends (AVX2, SSE4.2).
+//! x86_64 SIMD backend (AVX2).
 //!
-//! Runtime CPUID dispatch selects the best available instruction set.
-//! Falls back to scalar if no SIMD is detected.
+//! A runtime CPUID check picks AVX2 when the CPU has it; otherwise the
+//! scalar paths run.
 
-#[allow(dead_code)]
 pub mod avx2;
-#[allow(dead_code)]
-pub mod partition;
