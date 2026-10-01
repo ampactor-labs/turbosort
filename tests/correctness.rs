@@ -230,6 +230,54 @@ fn reverse_sorted() {
     assert_eq!(data, expected);
 }
 
+// --- Presorted input, across every tier ---
+
+const PRESORTED_SIZES: [usize; 8] = [17, 100, 128, 129, 512, 513, 5000, 200_000];
+
+/// Non-increasing input with runs of equal keys gets reversed, not sorted.
+#[test]
+fn reverse_with_duplicates() {
+    for n in PRESORTED_SIZES {
+        let mut data: Vec<u32> = (0..n as u32).rev().map(|i| i / 3).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort(&mut data);
+        assert_eq!(data, expected, "u32 n={n}");
+
+        let mut data: Vec<f64> = (0..n).rev().map(|i| (i / 3) as f64 - 50.0).collect();
+        turbosort::sort(&mut data);
+        assert!(data.windows(2).all(|w| w[0] <= w[1]), "f64 n={n}");
+
+        let mut data: Vec<i16> = (0..n).rev().map(|i| (i % 60_000) as i16).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort(&mut data);
+        assert_eq!(data, expected, "i16 n={n}");
+    }
+}
+
+/// Sorted except for the very end: the scan must not stop early and call
+/// the slice sorted.
+#[test]
+fn sorted_except_the_tail() {
+    for n in PRESORTED_SIZES {
+        let mut data: Vec<u64> = (0..n as u64).collect();
+        data.swap(n - 2, n - 1);
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort(&mut data);
+        assert_eq!(data, expected, "ascending n={n}");
+
+        let mut data: Vec<u64> = (0..n as u64).rev().collect();
+        data[n - 1] = u64::MAX;
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        let mut buf = vec![0u64; n];
+        turbosort::sort_with_buffer(&mut data, &mut buf);
+        assert_eq!(data, expected, "descending n={n}");
+    }
+}
+
 // --- Proptest ---
 
 macro_rules! proptest_sort {
@@ -405,6 +453,26 @@ mod parallel {
         let mut data: Vec<u32> = (0..N as u32).rev().collect();
         turbosort::sort_parallel(&mut data);
         assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn parallel_reverse_with_duplicates() {
+        let mut data: Vec<u64> = (0..N as u64).rev().map(|i| i / 5).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort_parallel(&mut data);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn parallel_small_input_uses_serial_sort() {
+        for n in [0usize, 1, 16, 17, 512, 513, 5000] {
+            let mut data: Vec<i32> = (0..n as i32).map(|i| (i * 7919) % 1013 - 500).collect();
+            let mut expected = data.clone();
+            expected.sort_unstable();
+            turbosort::sort_parallel(&mut data);
+            assert_eq!(data, expected, "n={n}");
+        }
     }
 
     #[test]

@@ -53,7 +53,7 @@ const WIDE_PASSES: usize = 6;
 /// zeroed — scatter passes fully overwrite it.
 #[cfg(feature = "alloc")]
 pub fn sort<T: SortableKey>(slice: &mut [T]) {
-    if slice.len() <= 1 || sorted_ascending(slice) {
+    if slice.len() <= 1 {
         return;
     }
     if T::Key::BYTES == 1 {
@@ -89,7 +89,7 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
         slice.len(),
         buffer.len()
     );
-    if slice.len() <= 1 || sorted_ascending(slice) {
+    if slice.len() <= 1 {
         return;
     }
     if T::Key::BYTES == 1 {
@@ -99,14 +99,6 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
     // SAFETY: buffer is a live &mut [T] of at least slice.len() elements and
     // cannot alias slice. WIDE = false keeps this path allocation-free.
     unsafe { sort_raw::<T, false>(slice, buffer.as_mut_ptr()) }
-}
-
-/// One scan; bails at the first inversion. Sorted inputs cost O(n) total
-/// instead of running every radix pass.
-pub(crate) fn sorted_ascending<T: SortableKey>(slice: &[T]) -> bool {
-    slice
-        .windows(2)
-        .all(|w| w[0].to_radix_key() <= w[1].to_radix_key())
 }
 
 /// Counting sort for one-byte keys: histogram, then rewrite from counts.

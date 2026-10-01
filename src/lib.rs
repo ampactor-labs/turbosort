@@ -41,6 +41,7 @@ mod arch;
 mod dispatch;
 #[cfg(feature = "parallel")]
 mod parallel;
+mod presorted;
 mod radix;
 mod small;
 mod tiny;
@@ -106,8 +107,8 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
 
 /// Sort a mutable slice using parallel LSD radix sort.
 ///
-/// Uses rayon to distribute work across multiple cores. Falls back to
-/// single-threaded radix sort for arrays below 131K elements.
+/// Uses rayon to distribute work across multiple cores. Below 131,072
+/// elements it runs the serial [`sort`] instead.
 ///
 /// Requires the `parallel` feature.
 ///

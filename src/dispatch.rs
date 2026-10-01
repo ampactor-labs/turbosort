@@ -7,6 +7,9 @@
 //!   ([`crate::small`])
 //! - >512: LSD radix sort ([`crate::radix`])
 //!
+//! Above 16 elements, one scan first finishes input that is already sorted
+//! either way ([`crate::presorted`]).
+//!
 //! [`sort_parallel`](crate::sort_parallel) adds a parallel radix tier for
 //! arrays over 131K elements.
 
@@ -25,6 +28,10 @@ pub fn sort<T: SortableKey>(slice: &mut [T]) {
 
     if len <= 16 {
         crate::tiny::sort(slice);
+        return;
+    }
+
+    if crate::presorted::finish_presorted(slice) {
         return;
     }
 
@@ -69,6 +76,10 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
 
     if len <= 16 {
         crate::tiny::sort(slice);
+        return;
+    }
+
+    if crate::presorted::finish_presorted(slice) {
         return;
     }
 

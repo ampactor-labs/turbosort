@@ -35,16 +35,16 @@ const PARALLEL_THRESHOLD: usize = 131_072;
 
 /// Sort a slice using parallel LSD radix sort.
 ///
-/// Falls back to single-threaded radix sort for arrays below 131K elements.
+/// Below 131,072 elements this is the serial [`crate::sort`].
 pub fn sort<T: SortableKey + Send + Sync>(slice: &mut [T])
 where
     T::Key: Send + Sync,
 {
     if slice.len() < PARALLEL_THRESHOLD {
-        crate::radix::sort(slice);
+        crate::dispatch::sort(slice);
         return;
     }
-    if crate::radix::sorted_ascending(slice) {
+    if crate::presorted::finish_presorted(slice) {
         return;
     }
     if T::Key::BYTES == 1 {
