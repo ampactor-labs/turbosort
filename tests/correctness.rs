@@ -637,6 +637,55 @@ mod parallel {
         }
     }
 
+    /// Structured 64-bit keys through the parallel 11-bit passes: diverting
+    /// with long runs, digits that never vary, and a digit that only varies
+    /// after the serial head of the varying-bits scan.
+    #[test]
+    fn parallel_u64_structured() {
+        let mut rng = StdRng::seed_from_u64(23);
+        let shapes: [(&str, Vec<u64>); 4] = [
+            (
+                "correlated top bytes",
+                (0..N)
+                    .map(|_| {
+                        let b = rng.gen::<u64>() & 0xFF;
+                        b << 56 | b << 48 | b << 40 | rng.gen::<u64>() >> 24
+                    })
+                    .collect(),
+            ),
+            (
+                "below 2^20",
+                (0..N).map(|_| rng.gen::<u64>() >> 44).collect(),
+            ),
+            (
+                "1000 distinct",
+                (0..N)
+                    .map(|_| {
+                        rng.gen_range(0..1000u64)
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    })
+                    .collect(),
+            ),
+            (
+                "late-varying digit",
+                (0..N)
+                    .map(|i| {
+                        let low = rng.gen::<u64>() & 0xFFFF_FFFF;
+                        let low = if i < 5000 { low & !(0x7FF << 11) } else { low };
+                        low | (rng.gen::<u64>() & 0x0101_0101) << 32
+                    })
+                    .collect(),
+            ),
+        ];
+        for (shape, data) in shapes {
+            let mut expected = data.clone();
+            expected.sort_unstable();
+            let mut sorted = data;
+            turbosort::sort_parallel(&mut sorted);
+            assert_eq!(sorted, expected, "{shape}");
+        }
+    }
+
     #[test]
     fn parallel_u8_counting() {
         let mut rng = StdRng::seed_from_u64(17);

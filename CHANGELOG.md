@@ -39,7 +39,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Diverting LSD for wide keys: the radix sort sorts only the top digits that
   carry log2(n) + 2 bits, then one scan finishes the short runs left. Random
   `u64` went from 0.63x to 1.18x `sort_unstable` at 4K and from 0.65x to
-  0.90x at 1M on the VM. `sort_parallel` does not divert yet.
+  0.90x at 1M on the VM.
+- `sort_parallel` diverts too, with the finishing scan split across threads
+  at run boundaries, and counts only the digits that vary: 10M random `u64`
+  went from 186-199 ms to 108-110 ms on four threads (2.1-2.2x
+  `sort_unstable`).
 - Byte radix passes whose buckets are many and nearly equal in size
   (permutations, pipe organs, sawtooths) stage each bucket's writes in a
   cache-line buffer and write whole lines. With equal buckets the plain
