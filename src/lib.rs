@@ -3,7 +3,8 @@
 //! `turbosort` sorts slices of the 10 primitive numeric types (`u8`, `u16`,
 //! `u32`, `u64`, `i8`, `i16`, `i32`, `i64`, `f32`, `f64`) with an O(n) LSD
 //! radix sort above 512 elements, and with AVX2 or NEON sorting networks
-//! below that for 4-byte types.
+//! below that for 4-byte types. With the `alloc` feature, `sort_by_key`
+//! sorts any type by a key of one of those types, stably.
 //!
 //! # Features
 //!
