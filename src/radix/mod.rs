@@ -302,7 +302,7 @@ mod tests {
         // Duplicates: runs of identical keys.
         check_cores(
             (0..5000)
-                .map(|_| xorshift(&mut state) % 300 * 0x9E37_79B9_7F4A_7C15)
+                .map(|_| (xorshift(&mut state) % 300).wrapping_mul(0x9E37_79B9_7F4A_7C15))
                 .collect(),
         );
     }

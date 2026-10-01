@@ -156,7 +156,10 @@ fn large_u64_structured() {
             (
                 "1000 distinct",
                 (0..size)
-                    .map(|_| rng.gen_range(0..1000u64) * 0x9E37_79B9_7F4A_7C15)
+                    .map(|_| {
+                        rng.gen_range(0..1000u64)
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    })
                     .collect(),
             ),
             (
@@ -389,7 +392,7 @@ proptest! {
         mut data in proptest::collection::vec(any::<u64>(), 513..=6000),
     ) {
         for x in data.iter_mut() {
-            *x = if dup { *x % modulus * 0x9E37_79B9_7F4A_7C15 } else { *x >> shift };
+            *x = if dup { (*x % modulus).wrapping_mul(0x9E37_79B9_7F4A_7C15) } else { *x >> shift };
         }
         let mut expected = data.clone();
         expected.sort_unstable();
