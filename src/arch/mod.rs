@@ -39,11 +39,11 @@ pub fn sort_small<T: SortableKey>(slice: &mut [T]) {
     #[cfg(target_arch = "x86_64")]
     {
         if is_avx2_u32_type::<T>() {
-            unsafe { x86_64::avx2::quicksort_u32_keys_generic(slice) };
+            unsafe { x86_64::avx2::sort_small_u32_keys_generic(slice) };
             return;
         }
     }
-    scalar::quicksort(slice);
+    scalar::comparison_sort(slice);
 }
 
 /// Check if AVX2 is available and the type has a 4-byte key (u32/i32/f32).

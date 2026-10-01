@@ -39,8 +39,6 @@ pub mod key;
 
 mod arch;
 mod dispatch;
-#[cfg(target_arch = "x86_64")]
-mod lut;
 #[cfg(feature = "parallel")]
 mod parallel;
 mod radix;
@@ -51,14 +49,17 @@ pub use key::SortableKey;
 
 /// Sort a mutable slice of any [`SortableKey`] type in ascending order.
 ///
-/// Automatically selects the optimal algorithm based on input size:
-/// - n ≤ 16: sorting network
-/// - 17 ≤ n ≤ 512: SIMD sorting networks up to 128 elements, then quicksort
-///   with network leaves (scalar quicksort without AVX2)
+/// Picks an algorithm by input size:
+/// - n ≤ 16: a sorting network for 4-byte keys on AVX2 or NEON, insertion
+///   sort otherwise
+/// - 17 ≤ n ≤ 512: with AVX2 and a 4-byte key, register networks up to 128
+///   elements and merged 128-element blocks above that; otherwise `core`'s
+///   unstable sort
 /// - n > 512: LSD radix sort (requires `alloc` feature); already-sorted
 ///   inputs are detected in one scan and returned unchanged
 ///
-/// Without the `alloc` feature, arrays > 512 elements fall back to quicksort.
+/// Without the `alloc` feature, arrays over 512 elements use `core`'s
+/// unstable sort, which needs no scratch memory.
 ///
 /// # Examples
 ///

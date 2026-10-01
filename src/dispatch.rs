@@ -2,8 +2,9 @@
 //!
 //! Routes to the optimal algorithm based on input length:
 //! - 0-1: no-op
-//! - 2-16: sorting network ([`crate::tiny`])
-//! - 17-512: sorting networks + quicksort ([`crate::small`])
+//! - 2-16: sorting network or insertion sort ([`crate::tiny`])
+//! - 17-512: sorting networks and merges, or `core`'s unstable sort
+//!   ([`crate::small`])
 //! - >512: LSD radix sort ([`crate::radix`])
 //!
 //! [`sort_parallel`](crate::sort_parallel) adds a parallel radix tier for
@@ -37,10 +38,10 @@ pub fn sort<T: SortableKey>(slice: &mut [T]) {
         crate::radix::sort(slice);
     }
 
-    // no_std without alloc: fall back to quicksort
+    // no_std without alloc: no scratch buffer for the radix sort.
     #[cfg(not(feature = "alloc"))]
     {
-        crate::arch::scalar::quicksort(slice);
+        crate::arch::scalar::comparison_sort(slice);
     }
 }
 

@@ -1,8 +1,8 @@
 //! Medium arrays (17 ≤ n ≤ 512).
 //!
-//! With AVX2, sizes up to 128 go straight to padded sorting networks and
-//! larger sizes run quicksort with SIMD partition and network leaves.
-//! Falls back to scalar quicksort with Hoare partition.
+//! With AVX2 and a 4-byte key, sizes up to 128 go straight to padded sorting
+//! networks and larger sizes sort 128-element blocks and merge them. Every
+//! other case uses `core`'s unstable sort on the radix keys.
 
 use crate::key::SortableKey;
 
