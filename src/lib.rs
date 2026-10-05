@@ -55,6 +55,10 @@ mod tiny;
 
 pub use key::SortableKey;
 
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub use by_key::SortByKeyBuffer;
+
 /// Sort a mutable slice of any [`SortableKey`] type in ascending order.
 ///
 /// Picks an algorithm by input size:
@@ -123,14 +127,16 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
 /// order (a stable sort).
 ///
 /// `key` returns one of the [`SortableKey`] types, and the elements can be
-/// any type: they are only moved, never copied or cloned. From 256 elements
+/// any type: they are only moved, never copied or cloned. From 128 elements
 /// `key` is called once per element, the keys are radix-sorted together with
 /// each element's position, and the elements are then moved into order
 /// through a buffer. Below that this is the standard library's stable
 /// `sort_by_key`, which calls `key` on every comparison.
 ///
-/// Requires the `alloc` feature. From 256 elements it allocates two arrays
-/// of 8 bytes per element (16 for 8-byte keys) and room for the elements.
+/// This allocates its buffers on every call: two arrays of 8 bytes per
+/// element (16 for 8-byte keys) and room for the elements. Code that sorts
+/// often should keep a [`SortByKeyBuffer`] and call
+/// [`sort_by_key_with_buffer`]. Requires the `alloc` feature.
 ///
 /// # Examples
 ///
@@ -148,6 +154,46 @@ where
     F: FnMut(&T) -> K,
 {
     by_key::sort_by_key(slice, key);
+}
+
+/// [`sort_by_key`] with caller-owned memory: once `buffer` has grown to the
+/// slice's length, sorting allocates nothing.
+///
+/// Keep one [`SortByKeyBuffer`] per element and key type and pass it to every
+/// sort. It grows to the longest slice it has sorted and holds no elements
+/// between calls. Every length goes through it, and `key` is called once per
+/// element; below 64 elements the keys are insertion-sorted instead of
+/// radix-sorted. Slices of more than `u32::MAX` elements fall back to the
+/// standard library's stable sort.
+///
+/// # Examples
+///
+/// ```
+/// struct Thing {
+///     id: u32,
+///     data: [u64; 4],
+/// }
+///
+/// let mut things: Vec<Thing> = (0..1000)
+///     .map(|i| Thing { id: (i * 7919) % 1000, data: [i as u64; 4] })
+///     .collect();
+/// let mut buffer = turbosort::SortByKeyBuffer::new();
+/// for _ in 0..3 {
+///     // ... the program reorders `things` ...
+///     turbosort::sort_by_key_with_buffer(&mut things, &mut buffer, |t| t.id);
+///     assert!(things.windows(2).all(|w| w[0].id <= w[1].id));
+/// }
+/// assert!(buffer.capacity() >= things.len());
+/// ```
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+#[inline]
+pub fn sort_by_key_with_buffer<T, K, F>(slice: &mut [T], buffer: &mut SortByKeyBuffer<T, K>, key: F)
+where
+    K: SortableKey,
+    F: FnMut(&T) -> K,
+{
+    by_key::sort_by_key_with_buffer(slice, buffer, key);
 }
 
 /// Sort a mutable slice using parallel LSD radix sort.

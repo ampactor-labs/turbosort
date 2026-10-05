@@ -275,6 +275,18 @@ fn bench_by_key_pair<K: turbosort::SortableKey + Ord>(
             )
         },
     );
+    let mut buffer = turbosort::SortByKeyBuffer::new();
+    group.bench_with_input(
+        BenchmarkId::new(format!("turbosort_buffer/{name}"), size),
+        data,
+        |b, data| {
+            b.iter_batched_ref(
+                || data.to_vec(),
+                |d| turbosort::sort_by_key_with_buffer(d, &mut buffer, |r| r.key),
+                criterion::BatchSize::LargeInput,
+            )
+        },
+    );
     group.bench_with_input(
         BenchmarkId::new(format!("std_stable/{name}"), size),
         data,

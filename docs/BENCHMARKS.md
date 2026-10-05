@@ -174,20 +174,20 @@ The `sort_unstable` column is from the run of the current code. Three changes ac
 
 ### sort_by_key
 
-`sort_by_key` is new, so there is no 0.2.1 side; the baseline is the standard library's stable `sort_by_key`, which keeps equal keys in order as `sort_by_key` does. The `by_key` group sorts 32-byte records (a key and 24 bytes of payload) by a random key, from one run at 10 samples on the same VM:
+`sort_by_key` and `sort_by_key_with_buffer` are new, so there is no 0.2.1 side; the baseline is the standard library's stable `sort_by_key`, which keeps equal keys in order as both of them do. The `by_key` group sorts 32-byte records (a key and 24 bytes of payload) by a random key, from one run at 10 samples on the same VM; the buffered series reuses one `SortByKeyBuffer` for every iteration:
 
 ```sh
 cargo bench --bench sort_bench -- '^by_key/' --sample-size 10 --warm-up-time 1 --measurement-time 3
 ```
 
-| Key | Records | Standard library | turbosort | vs standard library |
-| --- | --- | --- | --- | --- |
-| `u32` | 1,000 | 15.2 µs | 8.24 µs | 1.84x |
-| `u32` | 65,536 | 3.01 ms | 1.01 ms | 2.97x |
-| `u32` | 1M | 78.1 ms | 59.1 ms | 1.32x |
-| `u64` | 1,000 | 14.6 µs | 11.4 µs | 1.28x |
-| `u64` | 65,536 | 2.98 ms | 1.48 ms | 2.01x |
-| `u64` | 1M | 80.3 ms | 84.8 ms | 0.95x |
+| Key | Records | Standard library | `sort_by_key` | Buffer reused | `sort_by_key` vs standard library | Buffer reused vs standard library |
+| --- | --- | --- | --- | --- | --- | --- |
+| `u32` | 1,000 | 17.4 µs | 9.3 µs | 10.5 µs | 1.87x | 1.66x |
+| `u32` | 65,536 | 3.40 ms | 0.91 ms | 1.06 ms | 3.74x | 3.22x |
+| `u32` | 1M | 83.1 ms | 73.2 ms | 39.3 ms | 1.14x | 2.11x |
+| `u64` | 1,000 | 17.5 µs | 12.1 µs | 12.1 µs | 1.45x | 1.45x |
+| `u64` | 65,536 | 3.35 ms | 1.49 ms | 1.51 ms | 2.26x | 2.22x |
+| `u64` | 1M | 87.6 ms | 92.9 ms | 64.1 ms | 0.94x | 1.37x |
 
-At a million records, timing each phase in a scratch harness put 75% (`u64`) to 85% (`u32`) of the time in the radix passes over the entries and in moving the records into their new order, which write 48 to 64 MB of freshly allocated memory per call. The same harness, sorting batches of distinct record arrays, measured `u32` keys at 2.1x at a million, and found the losses the README lists: few distinct keys (0.6x for `u64` at a million), and input already sorted (0.7x) or reversed (0.5x), where the standard library finishes in one pass over the records.
+An earlier run of the allocating version measured 1.84x, 2.97x and 1.32x for `u32` and 1.28x, 2.01x and 0.95x for `u64`, so differences of 10 to 20% between runs are noise; the gap at a million records is not. There, timing each phase in a scratch harness put 75% (`u64`) to 85% (`u32`) of the time in the radix passes over the entries and in moving the records into their new order, which write 48 to 64 MB of freshly allocated memory per call; the buffered version writes into memory it has already touched. The same harness, sorting batches of distinct record arrays, measured `u32` keys at 2.1x at a million, and found the losses the README lists: few distinct keys (0.6x for `u64` at a million), and input already sorted (0.7x) or reversed (0.5x), where the standard library finishes in one pass over the records.
 

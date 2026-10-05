@@ -492,8 +492,12 @@ proptest! {
         let mut items: Vec<(u32, usize)> = keys.iter().map(|k| k % modulus).zip(0..).collect();
         let mut expected = items.clone();
         expected.sort_by_key(|&(k, _)| k);
+        let mut buffered = items.clone();
         turbosort::sort_by_key(&mut items, |&(k, _)| k);
-        prop_assert_eq!(items, expected);
+        prop_assert_eq!(&items, &expected);
+        let mut buffer = turbosort::SortByKeyBuffer::new();
+        turbosort::sort_by_key_with_buffer(&mut buffered, &mut buffer, |&(k, _)| k);
+        prop_assert_eq!(&buffered, &expected);
     }
 
     #[test]
@@ -510,8 +514,12 @@ proptest! {
             .collect();
         let mut expected = items.clone();
         expected.sort_by_key(|&(k, _)| k);
+        let mut buffered = items.clone();
         turbosort::sort_by_key(&mut items, |&(k, _)| k);
-        prop_assert_eq!(items, expected);
+        prop_assert_eq!(&items, &expected);
+        let mut buffer = turbosort::SortByKeyBuffer::new();
+        turbosort::sort_by_key_with_buffer(&mut buffered, &mut buffer, |&(k, _)| k);
+        prop_assert_eq!(&buffered, &expected);
     }
 
     #[test]
