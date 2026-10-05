@@ -4,6 +4,116 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- From 17 to 512 elements, both quicksorts (AVX2 for 4-byte keys from 129
+  elements, scalar for every other case) handed the whole slice to
+  insertion sort when median-of-three picked the minimum or the depth limit
+  hit. Sorted, reversed, few-unique, pipe-organ and sawtooth input ran at
+  0.05x to 0.52x of `sort_unstable` at 512 elements (up to 43 µs against
+  2-5 µs).
+- `sort` without the `alloc` feature went quadratic above 512 elements on
+  the same patterns: 795 ms for 80,000 `u32` of `i % 4`. It now uses
+  `core`'s `sort_unstable`.
+- Reversed input above 512 elements ran every radix pass, at 0.03x to 0.11x
+  of `sort_unstable` from 1K to 64K elements; it is now reversed in one scan.
+- The rustdoc said NaN sorts last. Only a NaN with the sign bit clear does;
+  one with it set (x86's `0.0 / 0.0`) sorts first, as `f32::total_cmp` and
+  the README say.
+- `sort_parallel` below 131,072 elements ran the radix core directly, even
+  for slices the networks handle; it now runs the serial `sort`.
+- Depending on the type and the calling code, the compiler inlined the
+  radix sort into `sort` and `sort_with_buffer`, and every call then probed
+  40 KiB or more of stack for its histograms before looking at the length,
+  even to sort two elements. The radix cores and the counting sort are no
+  longer inlined.
+
+### Changed
+- AVX2, 4-byte keys, 129 to 512 elements: 128-element network blocks merged
+  with an 8-wide bitonic merge replace the quicksort. 512 random `u32` went
+  from 1.46x to 2.15x `sort_unstable` on a 4-vCPU Xeon VM, and no input
+  pattern is slower than another.
+- Every other type and platform from 17 to 512 elements uses `core`'s
+  `sort_unstable_by_key` on the radix key instead of the scalar quicksort.
+- Above 16 elements, one vectorized scan finishes ascending and descending
+  input before any tier runs; before, only the radix tier checked, and only
+  for ascending input.
+- `u8` and `i8` use the counting sort from 48 elements instead of 513, in
+  every build, with interleaved counters from 8,192 elements. Below 256
+  elements it writes each digit where its run starts and carries it forward
+  with a running maximum, which has no branch per digit: 64 random `u8` in
+  batches of distinct slices went from 0.70x to 1.84x `sort_unstable`.
+- Diverting LSD for wide keys: the radix sort sorts only the top digits that
+  carry log2(n) + 2 bits, then one scan finishes the short runs left. Random
+  `u64` went from 0.63x to 1.18x `sort_unstable` at 4K and from 0.65x to
+  0.90x at 1M on the VM.
+- `sort_parallel` diverts too, with the finishing scan split across threads
+  at run boundaries, and counts only the digits that vary: 10M random `u64`
+  went from 186-199 ms to 108-110 ms on four threads (2.1-2.2x
+  `sort_unstable`).
+- Byte radix passes whose buckets are many and nearly equal in size
+  (permutations, pipe organs, sawtooths) stage each bucket's writes in a
+  cache-line buffer and write whole lines. With equal buckets the plain
+  scatter's write positions contend for a few cache sets. A random
+  permutation of 65,536 `u32` went from 758 µs to 344 µs (1.48x to 3.14x
+  `sort_unstable`); random keys never take this path.
+- The radix sort histograms only the bytes that vary. A first scan finds
+  them and stops early when every byte varies, so random keys pay nothing;
+  `u64` keys holding small values skip most of the histogram work. 65,536
+  `u64` with four distinct values went from 0.54x to 1.33x `sort_unstable`,
+  and `u32` from 0.89x to 1.23x.
+- The AVX2 networks load keys straight into registers, with a masked load
+  for the last partial vector, and store them back in whole vectors and 16-,
+  8- and 4-byte pieces. 0.2.1 copied keys one at a time through a stack
+  buffer, and each vector load that overlapped those stores waited for them
+  to reach the cache. With the stack fix above, sorting distinct random `u32`
+  slices went from 1.82x to 7.55x `sort_unstable` at 8 elements, 3.77x to
+  12.4x at 16 and 1.65x to 4.62x at 17 on the VM.
+- On AVX2, slices of 2 and 3 four-byte keys use `core`'s sort instead of a
+  network, and lengths up to 16 without a network use `core`'s
+  `sort_unstable` instead of the crate's insertion sort.
+- Float keys are computed without a branch, so scans over them vectorize:
+  512 sorted `f32` went from 379 ns to 276 ns on the VM, and 65,536 from
+  32 µs to 25 µs.
+- The crate description no longer says "SIMD-accelerated radix sort": the
+  radix passes are scalar; SIMD is in the small-slice networks and merges.
+
+### Added
+- `sort_by_key`, with the `alloc` feature: a stable sort of any type by a
+  key of one of the ten number types (issue #2). The key function runs once
+  per element; the keys are radix-sorted with each element's position, and
+  the elements are moved into place, so they need not be `Copy`.
+- `sort_by_key_with_buffer` and `SortByKeyBuffer`: the same sort through
+  memory the caller keeps between calls, so repeated sorts allocate nothing
+  once the buffer has grown; `sort_by_key` wraps it with a fresh buffer.
+  On 32-byte records with random keys, against the standard library's
+  stable `sort_by_key` on the VM, a reused buffer ran 1.66x, 3.22x and 2.11x
+  as fast at 1,000, 65,536 and 1M `u32` keys and 1.45x, 2.22x and 1.37x for
+  `u64`; allocating per call, 1M ran at 1.14x and 0.94x.
+- `no_std` builds on x86_64 use the AVX2 networks when compiled with AVX2
+  enabled (`-C target-feature=+avx2` or a `target-cpu` that has it); before,
+  they never did. CI runs the tests in that configuration.
+- A `patterns` benchmark group: sorted, reversed, few-unique, pipe-organ,
+  sawtooth and permutation inputs for `u32` and `u64` at 512 and 65,536.
+- A `small_batches` benchmark group, which sorts many distinct short slices.
+  The single-input groups let the branch predictor learn their one input.
+- Tests for the AVX2 networks at every length up to 128 and with signed and
+  float keys, the merge tier at every length from 129 to 512, the presorted
+  scan, the diverting digit choice and finishing scan, presorted input in
+  every tier, and structured `u64` and `f64` inputs.
+- CI runs the test suite without default features and with only `alloc`,
+  and lints tests and benches; the release workflow runs the tests before
+  publishing.
+- The release workflow can publish through crates.io Trusted Publishing
+  (short-lived tokens from GitHub's OIDC identity) once it is configured on
+  crates.io, and falls back to the `CARGO_REGISTRY_TOKEN` secret until then.
+  Its checkout no longer keeps the GitHub token in `.git/config`.
+
+### Removed
+- The AVX2 partition (`src/arch/x86_64/partition.rs`) and its lookup table
+  (`src/lut.rs`), which only the quicksort used.
+
 ## [0.2.1] - 2026-07-29
 
 ### Added
@@ -87,6 +197,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - AVX2 sorting networks for tiny inputs, quicksort + SIMD leaf for mid-range
   arrays, and LSD radix for large arrays.
 
+[Unreleased]: https://github.com/ampactor-labs/turbosort/compare/v0.2.1...HEAD
 [0.2.1]: https://github.com/ampactor-labs/turbosort/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ampactor-labs/turbosort/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/ampactor-labs/turbosort/compare/v0.1.0...v0.1.1

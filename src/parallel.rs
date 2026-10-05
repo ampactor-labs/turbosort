@@ -18,7 +18,10 @@
 //! and loses more than the saved sequential read is worth.
 //!
 //! Eight-byte keys use 11-bit digits (six passes) like the serial wide path;
-//! smaller keys use byte digits.
+//! smaller keys use byte digits. As in the serial cores, digits that never
+//! vary are not counted, and when the top digits alone nearly order the keys
+//! the low passes are replaced by a finishing scan (see `radix::divert`),
+//! here split across threads at run boundaries.
 
 extern crate alloc;
 
@@ -28,23 +31,27 @@ use alloc::vec::Vec;
 use rayon::prelude::*;
 
 use crate::key::{SortableKey, UnsignedKey};
-use crate::radix::{histogram, prefix_sum};
+use crate::radix::{divert, histogram, prefix_sum};
+
+/// Keys the serial head of the varying-bits scan reads before the rest, if
+/// still needed, is scanned in parallel.
+const SERIAL_SCAN: usize = 4096;
 
 /// Minimum array size before parallel sort kicks in.
 const PARALLEL_THRESHOLD: usize = 131_072;
 
 /// Sort a slice using parallel LSD radix sort.
 ///
-/// Falls back to single-threaded radix sort for arrays below 131K elements.
+/// Below 131,072 elements this is the serial [`crate::sort`].
 pub fn sort<T: SortableKey + Send + Sync>(slice: &mut [T])
 where
     T::Key: Send + Sync,
 {
     if slice.len() < PARALLEL_THRESHOLD {
-        crate::radix::sort(slice);
+        crate::dispatch::sort(slice);
         return;
     }
-    if crate::radix::sorted_ascending(slice) {
+    if crate::presorted::finish_presorted(slice) {
         return;
     }
     if T::Key::BYTES == 1 {
@@ -83,18 +90,46 @@ where
     let num_chunks = len.div_ceil(chunk_size);
     let chunk_range = |t: usize| (t * chunk_size, ((t + 1) * chunk_size).min(len));
 
-    // Step 1: per-chunk histograms of every pass, in one parallel scan of the
-    // original data. Summed they give the global (order-independent) counts;
-    // sliced per pass they are the first pass's per-chunk counts.
+    // Step 0: which digits vary at all. Random keys settle it within the
+    // serial head; otherwise the rest of the scan runs in parallel.
+    let head = len.min(SERIAL_SCAN);
+    let varying = histogram::varying_bits(&slice[..head]).map(|head_bits| {
+        let first = slice[0].to_radix_key().to_u64();
+        head_bits
+            | slice[head..]
+                .par_chunks(chunk_size)
+                .map(|c| {
+                    c.iter()
+                        .fold(0, |acc, x| acc | (x.to_radix_key().to_u64() ^ first))
+                })
+                .reduce(|| 0, |a, b| a | b)
+    });
+    let counted: Vec<usize> = (0..PASSES)
+        .filter(|&p| varying.map_or(true, |v| (v >> (p as u32 * bits)) & mask as u64 != 0))
+        .collect();
+
+    // Step 1: per-chunk histograms of the counted digits, in one parallel scan
+    // of the original data. Summed they give the global (order-independent)
+    // counts; sliced per pass they are the first pass's per-chunk counts.
     let all_pass_hists: Vec<Vec<usize>> = (0..num_chunks)
         .into_par_iter()
         .map(|t| {
             let (start, end) = chunk_range(t);
             let mut hist = vec![0usize; PASSES * BINS];
-            for elem in &slice[start..end] {
-                let key = elem.to_radix_key();
-                for pass in 0..PASSES {
-                    hist[pass * BINS + key.wide_digit(pass as u32 * bits, mask)] += 1;
+            if counted.len() == PASSES {
+                // Every digit varies: the fixed-count loop unrolls.
+                for elem in &slice[start..end] {
+                    let key = elem.to_radix_key();
+                    for pass in 0..PASSES {
+                        hist[pass * BINS + key.wide_digit(pass as u32 * bits, mask)] += 1;
+                    }
+                }
+            } else {
+                for elem in &slice[start..end] {
+                    let key = elem.to_radix_key();
+                    for &pass in &counted {
+                        hist[pass * BINS + key.wide_digit(pass as u32 * bits, mask)] += 1;
+                    }
                 }
             }
             hist
@@ -109,11 +144,22 @@ where
     }
 
     // Passes where the digit actually varies; the rest are no-op scatters.
-    let live: Vec<usize> = (0..PASSES)
+    let live: Vec<usize> = counted
+        .iter()
+        .copied()
         .filter(|&p| !histogram::is_pass_trivial(&global[p * BINS..(p + 1) * BINS], len))
         .collect();
+    let skip = divert::skippable_digits(live.len(), len, |i| {
+        let pass = live[i];
+        global[pass * BINS..(pass + 1) * BINS]
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    });
+    let passes = &live[skip..];
 
-    let first = match live.first() {
+    let first = match passes.first() {
         Some(&p) => p,
         None => return,
     };
@@ -129,7 +175,7 @@ where
 
     let mut in_scratch = false;
 
-    for (li, &pass) in live.iter().enumerate() {
+    for (li, &pass) in passes.iter().enumerate() {
         let shift = pass as u32 * bits;
 
         let (src_addr, dst_addr) = if in_scratch {
@@ -210,4 +256,36 @@ where
             }
         });
     }
+
+    if skip > 0 {
+        finish_runs_parallel(slice, first as u32 * bits, num_chunks);
+    }
+}
+
+/// [`divert::finish_runs`] across threads: cut `slice` into about `parts`
+/// pieces at run boundaries, so no run is split, and finish each piece.
+fn finish_runs_parallel<T: SortableKey + Send>(slice: &mut [T], shift: u32, parts: usize) {
+    let len = slice.len();
+    let prefix = |x: &T| x.to_radix_key().wide_digit(shift, usize::MAX);
+    let mut cuts = Vec::with_capacity(parts + 1);
+    cuts.push(0);
+    for t in 1..parts {
+        let mut cut = (t * len / parts).max(cuts[t - 1]);
+        while cut > 0 && cut < len && prefix(&slice[cut]) == prefix(&slice[cut - 1]) {
+            cut += 1;
+        }
+        cuts.push(cut);
+    }
+    cuts.push(len);
+
+    let mut pieces = Vec::with_capacity(parts);
+    let mut rest = slice;
+    for w in cuts.windows(2) {
+        let (piece, tail) = rest.split_at_mut(w[1] - w[0]);
+        pieces.push(piece);
+        rest = tail;
+    }
+    pieces
+        .into_par_iter()
+        .for_each(|piece| divert::finish_runs(piece, shift));
 }

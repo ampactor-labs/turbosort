@@ -14,10 +14,14 @@
 //! - Eight-byte keys on large inputs switch to wider digits
 //!   ([`sort_core_wide`]): fewer, more expensive passes. The width is chosen
 //!   from benchmarks (see `WIDE_BINS`).
+//! - Both cores divert ([`divert`]): when the top digits alone carry enough
+//!   bits to nearly order the keys, the low-digit passes are replaced by one
+//!   scan that sorts the short runs left over.
 //!
 //! The scratch buffer never needs to be initialized: every scatter pass
 //! writes all `len` positions of its destination.
 
+pub mod divert;
 pub mod histogram;
 pub mod prefix_sum;
 pub mod scatter;
@@ -53,7 +57,7 @@ const WIDE_PASSES: usize = 6;
 /// zeroed — scatter passes fully overwrite it.
 #[cfg(feature = "alloc")]
 pub fn sort<T: SortableKey>(slice: &mut [T]) {
-    if slice.len() <= 1 || sorted_ascending(slice) {
+    if slice.len() <= 1 {
         return;
     }
     if T::Key::BYTES == 1 {
@@ -89,7 +93,7 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
         slice.len(),
         buffer.len()
     );
-    if slice.len() <= 1 || sorted_ascending(slice) {
+    if slice.len() <= 1 {
         return;
     }
     if T::Key::BYTES == 1 {
@@ -101,20 +105,29 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
     unsafe { sort_raw::<T, false>(slice, buffer.as_mut_ptr()) }
 }
 
-/// One scan; bails at the first inversion. Sorted inputs cost O(n) total
-/// instead of running every radix pass.
-pub(crate) fn sorted_ascending<T: SortableKey>(slice: &[T]) -> bool {
-    slice
-        .windows(2)
-        .all(|w| w[0].to_radix_key() <= w[1].to_radix_key())
-}
+/// Below this length, [`counting_sort`] writes its output with [`mark_runs`].
+/// With fewer keys than digits, filling each digit's run branches on counts
+/// that are zero at random and calls `memset` for one or two keys: 64 random
+/// `u8` took 2.6x longer that way. At 256 the two cost the same.
+const MARK_RUNS_MAX: usize = 256;
 
 /// Counting sort for one-byte keys: histogram, then rewrite from counts.
+///
+/// Needs no scratch buffer, so it also serves `no_std` builds without
+/// `alloc`. Large inputs count into four interleaved histograms, like the
+/// radix passes, so runs of equal bytes do not serialize on one counter.
+/// Never inlined, for the same reason as [`sort_raw`].
+#[inline(never)]
 pub(crate) fn counting_sort<T: SortableKey>(slice: &mut [T]) {
     debug_assert_eq!(T::Key::BYTES, 1);
-    let mut counts = [0usize; 256];
-    for elem in slice.iter() {
-        counts[elem.to_radix_key().radix_digit(0) as usize] += 1;
+    let [counts] = if slice.len() >= INTERLEAVE_MIN {
+        histogram::compute_bytes::<T, 1, 4>(slice)
+    } else {
+        histogram::compute_bytes::<T, 1, 1>(slice)
+    };
+    if slice.len() < MARK_RUNS_MAX {
+        mark_runs(slice, &counts);
+        return;
     }
     let mut i = 0;
     for (d, &count) in counts.iter().enumerate() {
@@ -126,15 +139,42 @@ pub(crate) fn counting_sort<T: SortableKey>(slice: &mut [T]) {
     }
 }
 
+/// Rewrite `slice` in order from one-byte `counts`, without a branch on any
+/// count: each digit is written where its run starts (an absent digit's
+/// write lands where the next present digit overwrites it), then a running
+/// maximum carries each run's digit across the run.
+fn mark_runs<T: SortableKey>(slice: &mut [T], counts: &[usize; 256]) {
+    let len = slice.len();
+    let digit = |d: usize| T::from_radix_key(T::Key::from_digit(d as u8));
+    slice.fill(digit(0));
+    let mut start = 0;
+    for (d, &count) in counts.iter().enumerate() {
+        if start < len {
+            slice[start] = digit(d);
+        }
+        start += count;
+    }
+    let mut run = T::Key::from_digit(0);
+    for x in slice.iter_mut() {
+        run = run.max(x.to_radix_key());
+        *x = T::from_radix_key(run);
+    }
+}
+
 /// Dispatch to the monomorphized core for this key width.
 ///
 /// `WIDE` permits the wide-digit path for 8-byte keys, which allocates its
 /// histograms on the heap; callers that must not allocate pass `false`.
 ///
+/// Never inlined: the cores keep up to 64 KiB of histograms on the stack, and
+/// a caller that inlined them would probe that much stack on every call, even
+/// to sort two elements.
+///
 /// # Safety
 ///
 /// `scratch` must be valid for `slice.len()` writes and must not alias `slice`.
 /// It may be uninitialized.
+#[inline(never)]
 unsafe fn sort_raw<T: SortableKey, const WIDE: bool>(slice: &mut [T], scratch: *mut T) {
     match T::Key::BYTES {
         2 => sort_core_bytes::<T, 2>(slice, scratch),
@@ -160,18 +200,44 @@ unsafe fn sort_core_bytes<T: SortableKey, const PASSES: usize>(slice: &mut [T], 
     let len = slice.len();
     debug_assert_eq!(PASSES, T::Key::BYTES);
 
-    let hist = if len >= INTERLEAVE_MIN {
-        histogram::compute_bytes::<T, PASSES, 4>(slice)
-    } else {
-        histogram::compute_bytes::<T, PASSES, 1>(slice)
+    // Bytes that never vary need no histogram: keys holding small values in a
+    // wide type often vary in only one or two. The scan that finds them stops
+    // within the first block when every byte varies.
+    let varying = histogram::varying_bits(slice);
+    let mut counted = [0usize; PASSES];
+    let mut n_counted = 0;
+    for pass in 0..PASSES {
+        if varying.map_or(true, |v| (v >> (8 * pass)) & 0xFF != 0) {
+            counted[n_counted] = pass;
+            n_counted += 1;
+        }
+    }
+    let counted = &counted[..n_counted];
+    let hist = match (n_counted == PASSES, len >= INTERLEAVE_MIN) {
+        (true, true) => histogram::compute_bytes::<T, PASSES, 4>(slice),
+        (true, false) => histogram::compute_bytes::<T, PASSES, 1>(slice),
+        (false, true) => histogram::compute_bytes_live::<T, PASSES, 4>(slice, counted),
+        (false, false) => histogram::compute_bytes_live::<T, PASSES, 1>(slice, counted),
     };
 
-    let mut in_scratch = false;
+    // Live passes: digits that vary. A digit is constant exactly when the
+    // first key's bucket holds every key, and its scatter would be a no-op.
+    let first = slice[0].to_radix_key();
+    let mut live = [0usize; PASSES];
+    let mut n_live = 0;
     for (pass, h) in hist.iter().enumerate() {
-        if histogram::is_pass_trivial(h, len) {
-            continue;
+        if h[first.radix_digit(pass) as usize] < len {
+            live[n_live] = pass;
+            n_live += 1;
         }
-        let mut offsets = *h;
+    }
+    let skip = divert::skippable_digits(n_live, len, |i| {
+        hist[live[i]].iter().copied().max().unwrap_or(0)
+    });
+
+    let mut in_scratch = false;
+    for &pass in &live[skip..n_live] {
+        let mut offsets = hist[pass];
         prefix_sum::exclusive_prefix_sum(&mut offsets);
 
         let (src, dst) = if in_scratch {
@@ -181,12 +247,19 @@ unsafe fn sort_core_bytes<T: SortableKey, const PASSES: usize>(slice: &mut [T], 
         };
         // SAFETY: offsets is the exclusive prefix sum of this pass's histogram
         // of src[..len]; src/dst validity comes from the sort_raw contract.
-        scatter::scatter_pass(src, dst, len, &mut offsets, pass);
+        if scatter::wants_combining(&hist[pass], len) {
+            scatter::scatter_pass_combined(src, dst, len, &offsets, pass);
+        } else {
+            scatter::scatter_pass(src, dst, len, &mut offsets, pass);
+        }
         in_scratch = !in_scratch;
     }
 
     if in_scratch {
         core::ptr::copy_nonoverlapping(scratch as *const T, slice.as_mut_ptr(), len);
+    }
+    if skip > 0 {
+        divert::finish_runs(slice, 8 * live[skip] as u32);
     }
 }
 
@@ -216,9 +289,127 @@ mod tests {
     }
 
     #[test]
+    fn counting_sort_i8_interleaved_runs() {
+        // Above INTERLEAVE_MIN, with long runs of one value (the case the
+        // interleaving exists for) and every i8 value present.
+        let mut data: Vec<i8> = (0..INTERLEAVE_MIN as i32 * 2)
+            .map(|i| ((i / 97) % 256 - 128) as i8)
+            .collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        counting_sort(&mut data);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn counting_sort_both_outputs() {
+        // Lengths on both sides of MARK_RUNS_MAX, with digits missing at
+        // either end, between the present ones, and everywhere but one.
+        let mut state = 0x0123_4567_89AB_CDEFu64;
+        for len in [1, 2, 3, 47, 48, 200, 255, 256, 257, 1000] {
+            for case in 0..5 {
+                let mut data: Vec<i8> = (0..len)
+                    .map(|_| {
+                        let r = xorshift(&mut state);
+                        match case {
+                            0 => r as i8,
+                            1 => i8::MAX,
+                            2 => i8::MIN,
+                            3 => [i8::MIN, i8::MAX][(r & 1) as usize],
+                            _ => (r % 3) as i8 - 1,
+                        }
+                    })
+                    .collect();
+                let mut expected = data.clone();
+                expected.sort_unstable();
+                counting_sort(&mut data);
+                assert_eq!(data, expected, "len={len} case={case}");
+            }
+        }
+    }
+
+    #[test]
     fn wide_core_u64_small_input() {
         let mut state = 0x2545F4914F6CDD1Du64;
         let mut data: Vec<u64> = (0..2000).map(|_| xorshift(&mut state)).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        let mut scratch: Vec<u64> = Vec::with_capacity(data.len());
+        unsafe { sort_core_wide::<u64, WIDE_BINS, WIDE_PASSES>(&mut data, scratch.as_mut_ptr()) };
+        assert_eq!(data, expected);
+    }
+
+    /// Keys whose three top bytes are one random byte repeated: the
+    /// histograms promise 24 bits, the keys carry 8, so diverting leaves
+    /// runs of about len/256 for the finishing sort.
+    fn correlated_top_bytes(len: usize, state: &mut u64) -> Vec<u64> {
+        (0..len)
+            .map(|_| {
+                let b = xorshift(state) & 0xFF;
+                b << 56 | b << 48 | b << 40 | xorshift(state) >> 24
+            })
+            .collect()
+    }
+
+    fn check_cores(data: Vec<u64>) {
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        let mut scratch: Vec<u64> = Vec::with_capacity(data.len());
+
+        let mut bytes = data.clone();
+        unsafe { sort_core_bytes::<u64, 8>(&mut bytes, scratch.as_mut_ptr()) };
+        assert_eq!(bytes, expected, "byte core, len {}", data.len());
+
+        let mut wide = data;
+        unsafe { sort_core_wide::<u64, WIDE_BINS, WIDE_PASSES>(&mut wide, scratch.as_mut_ptr()) };
+        assert_eq!(wide, expected, "wide core, len {}", wide.len());
+    }
+
+    #[test]
+    fn cores_divert_on_random_keys() {
+        let mut state = 0x853C49E6748FEA9Bu64;
+        // Short runs: the finishing pass is mostly insertion sorts of 1-2 keys.
+        check_cores((0..3000).map(|_| xorshift(&mut state)).collect());
+        // Signed keys go through the key transform both ways.
+        let mut data: Vec<i64> = (0..3000).map(|_| xorshift(&mut state) as i64).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        let mut scratch: Vec<i64> = Vec::with_capacity(data.len());
+        unsafe { sort_core_bytes::<i64, 8>(&mut data, scratch.as_mut_ptr()) };
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn cores_divert_with_long_runs() {
+        let mut state = 0xC0FFEE123456789u64;
+        check_cores(correlated_top_bytes(5000, &mut state));
+        // Duplicates: runs of identical keys.
+        check_cores(
+            (0..5000)
+                .map(|_| (xorshift(&mut state) % 300).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                .collect(),
+        );
+    }
+
+    /// The varying-bits scan may stop once every byte has varied. An 11-bit
+    /// digit can straddle bytes, so stopping early must not leave a digit
+    /// that only varies later uncounted.
+    #[test]
+    fn wide_core_counts_digits_that_vary_after_the_first_block() {
+        // One random bit in each high byte: every byte varies, but the high
+        // digits carry too few bits to divert, so every live digit gets a pass.
+        fn key(state: &mut u64, low_mask: u64) -> u64 {
+            let low = xorshift(state) & low_mask;
+            let r = xorshift(state);
+            low | (r & 1) << 32 | (r >> 1 & 1) << 40 | (r >> 2 & 1) << 48 | (r >> 3 & 1) << 56
+        }
+        let mut state = 0x1234_5678_9ABC_DEF1u64;
+        // The first 200 keys vary bytes 1 and 2 only through bits 8..=10 and
+        // 22..=23, outside the second 11-bit digit (bits 11..=21).
+        let early = 0xFFFF_FFFF & !(0x7FF << 11);
+        let mut data: Vec<u64> = (0..200).map(|_| key(&mut state, early)).collect();
+        // Later keys vary there too.
+        data.extend((0..3000).map(|_| key(&mut state, 0xFFFF_FFFF)));
         let mut expected = data.clone();
         expected.sort_unstable();
         let mut scratch: Vec<u64> = Vec::with_capacity(data.len());
@@ -255,21 +446,60 @@ unsafe fn sort_core_wide<T: SortableKey, const BINS: usize, const PASSES: usize>
     let bits = BINS.trailing_zeros();
     let mask = BINS - 1;
 
+    // As in the byte core, count only the digits that vary.
+    let varying = histogram::varying_bits(slice);
+    let mut counted = [0usize; PASSES];
+    let mut n_counted = 0;
+    for pass in 0..PASSES {
+        if varying.map_or(true, |v| (v >> (pass as u32 * bits)) & mask as u64 != 0) {
+            counted[n_counted] = pass;
+            n_counted += 1;
+        }
+    }
+    let first = slice[0].to_radix_key();
     let mut hist = alloc::vec![0usize; PASSES * BINS];
-    for elem in slice.iter() {
-        let key = elem.to_radix_key();
+    if n_counted == PASSES {
+        for elem in slice.iter() {
+            let key = elem.to_radix_key();
+            for pass in 0..PASSES {
+                hist[pass * BINS + key.wide_digit(pass as u32 * bits, mask)] += 1;
+            }
+        }
+    } else {
+        for elem in slice.iter() {
+            let key = elem.to_radix_key();
+            for &pass in &counted[..n_counted] {
+                hist[pass * BINS + key.wide_digit(pass as u32 * bits, mask)] += 1;
+            }
+        }
         for pass in 0..PASSES {
-            hist[pass * BINS + key.wide_digit(pass as u32 * bits, mask)] += 1;
+            if !counted[..n_counted].contains(&pass) {
+                hist[pass * BINS + first.wide_digit(pass as u32 * bits, mask)] = len;
+            }
         }
     }
 
+    let mut live = [0usize; PASSES];
+    let mut n_live = 0;
+    for pass in 0..PASSES {
+        if hist[pass * BINS + first.wide_digit(pass as u32 * bits, mask)] < len {
+            live[n_live] = pass;
+            n_live += 1;
+        }
+    }
+    let skip = divert::skippable_digits(n_live, len, |i| {
+        let pass = live[i];
+        hist[pass * BINS..(pass + 1) * BINS]
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    });
+
     let mut offsets = alloc::vec![0usize; BINS];
     let mut in_scratch = false;
-    for pass in 0..PASSES {
+    for &pass in &live[skip..n_live] {
         let h = &hist[pass * BINS..(pass + 1) * BINS];
-        if histogram::is_pass_trivial(h, len) {
-            continue;
-        }
         offsets.copy_from_slice(h);
         prefix_sum::exclusive_prefix_sum(&mut offsets);
 
@@ -286,5 +516,8 @@ unsafe fn sort_core_wide<T: SortableKey, const BINS: usize, const PASSES: usize>
 
     if in_scratch {
         core::ptr::copy_nonoverlapping(scratch as *const T, slice.as_mut_ptr(), len);
+    }
+    if skip > 0 {
+        divert::finish_runs(slice, live[skip] as u32 * bits);
     }
 }

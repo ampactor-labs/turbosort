@@ -2,14 +2,27 @@
 //!
 //! Routes to the optimal algorithm based on input length:
 //! - 0-1: no-op
-//! - 2-16: sorting network ([`crate::tiny`])
-//! - 17-512: sorting networks + quicksort ([`crate::small`])
+//! - 2-16: sorting networks for 4-byte keys (AVX2 from 4 elements, NEON),
+//!   `core`'s unstable sort otherwise ([`crate::tiny`])
+//! - 17-512: sorting networks and merges, or `core`'s unstable sort
+//!   ([`crate::small`])
 //! - >512: LSD radix sort ([`crate::radix`])
+//!
+//! Above 16 elements, one scan first finishes input that is already sorted
+//! either way ([`crate::presorted`]). One-byte keys (`u8`, `i8`) use a
+//! counting sort from 48 elements, which needs no scratch buffer.
 //!
 //! [`sort_parallel`](crate::sort_parallel) adds a parallel radix tier for
 //! arrays over 131K elements.
 
-use crate::key::SortableKey;
+use crate::key::{SortableKey, UnsignedKey};
+
+/// One-byte keys switch to counting sort at this length. Below it, the
+/// counting sort's fixed cost (256 counters to clear and walk) loses to the
+/// comparison sorts on some inputs. From it, sorting batches of distinct
+/// slices measured it at least as fast on random, few-valued and ordered
+/// bytes, 1.8x to 3x faster at 64 and 2x to 5x at 512.
+const COUNTING_MIN: usize = 48;
 
 /// Sort a slice using the best algorithm for its size.
 ///
@@ -27,6 +40,15 @@ pub fn sort<T: SortableKey>(slice: &mut [T]) {
         return;
     }
 
+    if crate::presorted::finish_presorted(slice) {
+        return;
+    }
+
+    if T::Key::BYTES == 1 && len >= COUNTING_MIN {
+        crate::radix::counting_sort(slice);
+        return;
+    }
+
     if len <= 512 {
         crate::small::sort(slice);
         return;
@@ -37,10 +59,10 @@ pub fn sort<T: SortableKey>(slice: &mut [T]) {
         crate::radix::sort(slice);
     }
 
-    // no_std without alloc: fall back to quicksort
+    // no_std without alloc: no scratch buffer for the radix sort.
     #[cfg(not(feature = "alloc"))]
     {
-        crate::arch::scalar::quicksort(slice);
+        crate::arch::scalar::comparison_sort(slice);
     }
 }
 
@@ -68,6 +90,15 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
 
     if len <= 16 {
         crate::tiny::sort(slice);
+        return;
+    }
+
+    if crate::presorted::finish_presorted(slice) {
+        return;
+    }
+
+    if T::Key::BYTES == 1 && len >= COUNTING_MIN {
+        crate::radix::counting_sort(slice);
         return;
     }
 

@@ -4,7 +4,7 @@ use turbosort::SortableKey;
 // --- Helpers ---
 
 fn reference_sort<T: SortableKey>(data: &mut [T]) {
-    data.sort_by(|a, b| a.to_radix_key().cmp(&b.to_radix_key()));
+    data.sort_by_key(|a| a.to_radix_key());
 }
 
 // --- Exhaustive tests for small n ---
@@ -123,6 +123,127 @@ fn large_u64_with_buffer() {
     }
 }
 
+/// Structured 64-bit keys at sizes where `sort` takes the 11-bit path and
+/// `sort_with_buffer` the byte path, both diverting.
+#[test]
+fn large_u64_structured() {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    let mut rng = StdRng::seed_from_u64(77);
+    for size in [70_000usize, 200_000] {
+        let shapes: [(&str, Vec<u64>); 7] = [
+            ("random", (0..size).map(|_| rng.gen()).collect()),
+            (
+                "low 40 bits",
+                (0..size).map(|_| rng.gen::<u64>() >> 24).collect(),
+            ),
+            (
+                "constant low bytes",
+                (0..size).map(|_| rng.gen_range(0..5000u64) << 32).collect(),
+            ),
+            (
+                "top bit split",
+                (0..size)
+                    .map(|_| (rng.gen::<u64>() & 1) << 63 | rng.gen::<u64>() >> 8)
+                    .collect(),
+            ),
+            (
+                "correlated top bytes",
+                (0..size)
+                    .map(|_| {
+                        let b = rng.gen::<u64>() & 0xFF;
+                        b << 56 | b << 48 | b << 40 | rng.gen::<u64>() >> 24
+                    })
+                    .collect(),
+            ),
+            (
+                "1000 distinct",
+                (0..size)
+                    .map(|_| {
+                        rng.gen_range(0..1000u64)
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    })
+                    .collect(),
+            ),
+            (
+                "heavy tail",
+                (0..size)
+                    .map(|_| (1.0 / (rng.gen::<f64>() + 1e-9)).powf(1.5) as u64)
+                    .collect(),
+            ),
+        ];
+        for (shape, data) in shapes {
+            let mut expected = data.clone();
+            expected.sort_unstable();
+
+            let mut sorted = data.clone();
+            turbosort::sort(&mut sorted);
+            assert_eq!(sorted, expected, "sort, {shape}, size {size}");
+
+            let mut sorted = data;
+            let mut buf = vec![0u64; size];
+            turbosort::sort_with_buffer(&mut sorted, &mut buf);
+            assert_eq!(sorted, expected, "sort_with_buffer, {shape}, size {size}");
+        }
+    }
+}
+
+/// Inputs whose radix buckets all hold the same number of keys take the
+/// write-combining scatter; check them at sizes above its threshold, for
+/// every key width and through both entry points.
+#[test]
+fn equal_bucket_inputs() {
+    use rand::rngs::StdRng;
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+
+    let mut rng = StdRng::seed_from_u64(1234);
+    for size in [16_384usize, 65_536 + 17, 200_000] {
+        let mut perm: Vec<u32> = (0..size as u32).collect();
+        perm.shuffle(&mut rng);
+        let organ: Vec<u32> = (0..size as u32)
+            .map(|i| {
+                if (i as usize) < size / 2 {
+                    2 * i
+                } else {
+                    2 * (size as u32 - 1 - i)
+                }
+            })
+            .collect();
+
+        for (shape, base) in [("permutation", &perm), ("pipe organ", &organ)] {
+            let mut expected = base.clone();
+            expected.sort_unstable();
+            let mut data = base.clone();
+            turbosort::sort(&mut data);
+            assert_eq!(data, expected, "u32 {shape} {size}");
+
+            let wide: Vec<u64> = base.iter().map(|&x| x as u64 * 3).collect();
+            let mut expected = wide.clone();
+            expected.sort_unstable();
+            let mut data = wide.clone();
+            let mut buf = vec![0u64; size];
+            turbosort::sort_with_buffer(&mut data, &mut buf);
+            assert_eq!(data, expected, "u64 {shape} {size}");
+
+            let narrow: Vec<u16> = base.iter().map(|&x| x as u16).collect();
+            let mut expected = narrow.clone();
+            expected.sort_unstable();
+            let mut data = narrow;
+            turbosort::sort(&mut data);
+            assert_eq!(data, expected, "u16 {shape} {size}");
+
+            let floats: Vec<f32> = base.iter().map(|&x| x as f32 - 1000.0).collect();
+            let mut data = floats.clone();
+            turbosort::sort(&mut data);
+            let mut expected = floats;
+            expected.sort_by(|a, b| a.total_cmp(b));
+            assert_eq!(data, expected, "f32 {shape} {size}");
+        }
+    }
+}
+
 // --- Float edge cases ---
 
 #[test]
@@ -230,6 +351,54 @@ fn reverse_sorted() {
     assert_eq!(data, expected);
 }
 
+// --- Presorted input, across every tier ---
+
+const PRESORTED_SIZES: [usize; 8] = [17, 100, 128, 129, 512, 513, 5000, 200_000];
+
+/// Non-increasing input with runs of equal keys gets reversed, not sorted.
+#[test]
+fn reverse_with_duplicates() {
+    for n in PRESORTED_SIZES {
+        let mut data: Vec<u32> = (0..n as u32).rev().map(|i| i / 3).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort(&mut data);
+        assert_eq!(data, expected, "u32 n={n}");
+
+        let mut data: Vec<f64> = (0..n).rev().map(|i| (i / 3) as f64 - 50.0).collect();
+        turbosort::sort(&mut data);
+        assert!(data.windows(2).all(|w| w[0] <= w[1]), "f64 n={n}");
+
+        let mut data: Vec<i16> = (0..n).rev().map(|i| (i % 60_000) as i16).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort(&mut data);
+        assert_eq!(data, expected, "i16 n={n}");
+    }
+}
+
+/// Sorted except for the very end: the scan must not stop early and call
+/// the slice sorted.
+#[test]
+fn sorted_except_the_tail() {
+    for n in PRESORTED_SIZES {
+        let mut data: Vec<u64> = (0..n as u64).collect();
+        data.swap(n - 2, n - 1);
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort(&mut data);
+        assert_eq!(data, expected, "ascending n={n}");
+
+        let mut data: Vec<u64> = (0..n as u64).rev().collect();
+        data[n - 1] = u64::MAX;
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        let mut buf = vec![0u64; n];
+        turbosort::sort_with_buffer(&mut data, &mut buf);
+        assert_eq!(data, expected, "descending n={n}");
+    }
+}
+
 // --- Proptest ---
 
 macro_rules! proptest_sort {
@@ -266,6 +435,110 @@ macro_rules! proptest_sort {
             }
         }
     };
+}
+
+// Wide keys with structure the uniform strategies never produce: a varying
+// number of high bits cleared, and few distinct values. Both change how many
+// digits the radix sort diverts on.
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    #[test]
+    fn structured_u64(
+        shift in 0u32..60,
+        modulus in 1u64..2000,
+        dup in any::<bool>(),
+        mut data in proptest::collection::vec(any::<u64>(), 513..=6000),
+    ) {
+        for x in data.iter_mut() {
+            *x = if dup { (*x % modulus).wrapping_mul(0x9E37_79B9_7F4A_7C15) } else { *x >> shift };
+        }
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort(&mut data);
+        prop_assert_eq!(&data, &expected);
+    }
+
+    #[test]
+    fn structured_f64(
+        scale in 0i32..300,
+        data in proptest::collection::vec(any::<u64>(), 513..=6000),
+    ) {
+        let mut floats: Vec<f64> = data
+            .iter()
+            .map(|x| (*x as i64) as f64 * 2f64.powi(-scale))
+            .collect();
+        let mut expected = floats.clone();
+        reference_sort(&mut expected);
+        turbosort::sort(&mut floats);
+        prop_assert_eq!(
+            floats.iter().map(|f| f.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|f| f.to_bits()).collect::<Vec<_>>()
+        );
+    }
+}
+
+// Stable sorting by a key: tuples keyed by one field, against the standard
+// library's stable sort, which must agree element for element.
+#[cfg(feature = "alloc")]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    #[test]
+    fn sort_by_key_u32(
+        modulus in 1u32..5000,
+        keys in proptest::collection::vec(any::<u32>(), 0..=3000),
+    ) {
+        let mut items: Vec<(u32, usize)> = keys.iter().map(|k| k % modulus).zip(0..).collect();
+        let mut expected = items.clone();
+        expected.sort_by_key(|&(k, _)| k);
+        let mut buffered = items.clone();
+        turbosort::sort_by_key(&mut items, |&(k, _)| k);
+        prop_assert_eq!(&items, &expected);
+        let mut buffer = turbosort::SortByKeyBuffer::new();
+        turbosort::sort_by_key_with_buffer(&mut buffered, &mut buffer, |&(k, _)| k);
+        prop_assert_eq!(&buffered, &expected);
+    }
+
+    #[test]
+    fn sort_by_key_u64(
+        shift in 0u32..60,
+        modulus in 1u64..5000,
+        dup in any::<bool>(),
+        keys in proptest::collection::vec(any::<u64>(), 0..=3000),
+    ) {
+        let mut items: Vec<(u64, usize)> = keys
+            .iter()
+            .map(|&k| if dup { (k % modulus).wrapping_mul(0x9E37_79B9_7F4A_7C15) } else { k >> shift })
+            .zip(0..)
+            .collect();
+        let mut expected = items.clone();
+        expected.sort_by_key(|&(k, _)| k);
+        let mut buffered = items.clone();
+        turbosort::sort_by_key(&mut items, |&(k, _)| k);
+        prop_assert_eq!(&items, &expected);
+        let mut buffer = turbosort::SortByKeyBuffer::new();
+        turbosort::sort_by_key_with_buffer(&mut buffered, &mut buffer, |&(k, _)| k);
+        prop_assert_eq!(&buffered, &expected);
+    }
+
+    #[test]
+    fn sort_by_key_f64(
+        scale in 0i32..300,
+        modulus in 1u64..5000,
+        data in proptest::collection::vec(any::<u64>(), 0..=3000),
+    ) {
+        let mut items: Vec<(f64, usize)> = data
+            .iter()
+            .map(|&x| ((x % modulus) as i64 - (modulus / 2) as i64) as f64 * 2f64.powi(-scale))
+            .zip(0..)
+            .collect();
+        let mut expected = items.clone();
+        expected.sort_by(|a, b| a.0.total_cmp(&b.0));
+        turbosort::sort_by_key(&mut items, |&(k, _)| k);
+        let bits = |v: &[(f64, usize)]| v.iter().map(|&(k, i)| (k.to_bits(), i)).collect::<Vec<_>>();
+        prop_assert_eq!(bits(&items), bits(&expected));
+    }
 }
 
 proptest_sort!(prop_u8, u8);
@@ -405,6 +678,75 @@ mod parallel {
         let mut data: Vec<u32> = (0..N as u32).rev().collect();
         turbosort::sort_parallel(&mut data);
         assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn parallel_reverse_with_duplicates() {
+        let mut data: Vec<u64> = (0..N as u64).rev().map(|i| i / 5).collect();
+        let mut expected = data.clone();
+        expected.sort_unstable();
+        turbosort::sort_parallel(&mut data);
+        assert_eq!(data, expected);
+    }
+
+    #[test]
+    fn parallel_small_input_uses_serial_sort() {
+        for n in [0usize, 1, 16, 17, 512, 513, 5000] {
+            let mut data: Vec<i32> = (0..n as i32).map(|i| (i * 7919) % 1013 - 500).collect();
+            let mut expected = data.clone();
+            expected.sort_unstable();
+            turbosort::sort_parallel(&mut data);
+            assert_eq!(data, expected, "n={n}");
+        }
+    }
+
+    /// Structured 64-bit keys through the parallel 11-bit passes: diverting
+    /// with long runs, digits that never vary, and a digit that only varies
+    /// after the serial head of the varying-bits scan.
+    #[test]
+    fn parallel_u64_structured() {
+        let mut rng = StdRng::seed_from_u64(23);
+        let shapes: [(&str, Vec<u64>); 4] = [
+            (
+                "correlated top bytes",
+                (0..N)
+                    .map(|_| {
+                        let b = rng.gen::<u64>() & 0xFF;
+                        b << 56 | b << 48 | b << 40 | rng.gen::<u64>() >> 24
+                    })
+                    .collect(),
+            ),
+            (
+                "below 2^20",
+                (0..N).map(|_| rng.gen::<u64>() >> 44).collect(),
+            ),
+            (
+                "1000 distinct",
+                (0..N)
+                    .map(|_| {
+                        rng.gen_range(0..1000u64)
+                            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    })
+                    .collect(),
+            ),
+            (
+                "late-varying digit",
+                (0..N)
+                    .map(|i| {
+                        let low = rng.gen::<u64>() & 0xFFFF_FFFF;
+                        let low = if i < 5000 { low & !(0x7FF << 11) } else { low };
+                        low | (rng.gen::<u64>() & 0x0101_0101) << 32
+                    })
+                    .collect(),
+            ),
+        ];
+        for (shape, data) in shapes {
+            let mut expected = data.clone();
+            expected.sort_unstable();
+            let mut sorted = data;
+            turbosort::sort_parallel(&mut sorted);
+            assert_eq!(sorted, expected, "{shape}");
+        }
     }
 
     #[test]

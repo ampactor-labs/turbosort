@@ -1,7 +1,8 @@
 //! Sorting networks for very small arrays (n ≤ 16).
 //!
-//! Dispatches to SIMD sorting networks when available (AVX2 or NEON),
-//! falls back to insertion sort on scalar.
+//! 4-byte keys go to the SIMD networks: AVX2 from 4 elements, NEON at every
+//! length. Everything else uses `core`'s unstable sort, which is an insertion
+//! sort at these lengths.
 
 use crate::key::SortableKey;
 
