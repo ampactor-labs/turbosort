@@ -74,7 +74,7 @@ At 4K, where the data fits in cache, the ratios against `sort_unstable` match th
 
 ## Since 0.2.1
 
-These runs were made on 2026-10-01 on a shared cloud VM: a KVM guest with 4 vCPUs of an Intel Xeon at 2.10 GHz (AVX2 and AVX-512), 48 KiB of L1d and 2 MiB of L2 per core and a shared 260 MiB L3, using Rust 1.97.0. "Before" is commit 0ccf74e, the 0.2.1 code with later README changes, with the new `benches/sort_bench.rs` copied in so that both sides run the same benchmark file; "after" is the code with the changes listed under Unreleased in [CHANGELOG.md](../CHANGELOG.md). Each side is one criterion run at 20 samples per point, and each ratio is `sort_unstable`'s time from the same run divided by turbosort's. The host is shared, so absolute times drift between runs; compare the ratios.
+These runs were made on 2026-10-01 on a shared cloud VM: a KVM guest with 4 vCPUs of an Intel Xeon at 2.10 GHz (AVX2 and AVX-512), 48 KiB of L1d and 2 MiB of L2 per core and a shared 260 MiB L3, using Rust 1.97.0. "Before" is commit 0ccf74e, the 0.2.1 code with later README changes, with the new `benches/sort_bench.rs` copied in so that both sides run the same benchmark file; "after" is the code with the changes listed under 0.2.2 in [CHANGELOG.md](../CHANGELOG.md). Each side is one criterion run at 20 samples per point, and each ratio is `sort_unstable`'s time from the same run divided by turbosort's. The host is shared, so absolute times drift between runs; compare the ratios.
 
 ```sh
 # Run in each tree; the second command is the random-input groups.
@@ -159,7 +159,7 @@ The groups above sort one input over and over, so at small sizes the branch pred
 cargo bench --bench sort_bench -- '^small_batches/' --sample-size 20 --warm-up-time 1 --measurement-time 3
 ```
 
-| Slice length | `sort_unstable`, per slice | 0.2.1, per slice | Now, per slice | 0.2.1 vs `sort_unstable` | Now vs `sort_unstable` |
+| Slice length | `sort_unstable`, per slice | 0.2.1, per slice | 0.2.2, per slice | 0.2.1 vs `sort_unstable` | 0.2.2 vs `sort_unstable` |
 | --- | --- | --- | --- | --- | --- |
 | 4 | 11.6 ns | 31.8 ns | 7.8 ns | 0.36x | 1.49x |
 | 8 | 51.5 ns | 32.0 ns | 6.8 ns | 1.82x | 7.55x |
@@ -170,7 +170,7 @@ cargo bench --bench sort_bench -- '^small_batches/' --sample-size 20 --warm-up-t
 | 128 | 801 ns | 308 ns | 261 ns | 2.79x | 3.07x |
 | 512 | 4.58 µs | 5.22 µs | 1.90 µs | 0.84x | 2.41x |
 
-The `sort_unstable` column is from the run of the current code. Three changes account for the short lengths. The networks used to copy keys one at a time into a stack buffer and read it back with vector loads, and a vector load that overlaps several smaller stores waits for them to reach the cache; keys now go straight into registers. Depending on the type and the calling code, the compiler inlined the radix sort into `sort`, and then every call probed 40 to 48 KiB of stack for its histograms before looking at the length (0.2.1 did for `f32`; this branch did for `u32` before the fix); the radix cores are no longer inlined. And slices of 2 and 3 use insertion sort, which beats a network's fixed cost of about 7 ns there. At 512 the quicksort that 0.2.1 ran lost to `sort_unstable` on fresh inputs, although it won the single-input benchmark (1.46x above).
+The `sort_unstable` column is from the 0.2.2 run. Three changes account for the short lengths. The networks used to copy keys one at a time into a stack buffer and read it back with vector loads, and a vector load that overlaps several smaller stores waits for them to reach the cache; keys now go straight into registers. Depending on the type and the calling code, the compiler inlined the radix sort into `sort`, and then every call probed 40 to 48 KiB of stack for its histograms before looking at the length (0.2.1 did for `f32`; during 0.2.2's development it did for `u32` until the fix); the radix cores are no longer inlined. And slices of 2 and 3 use insertion sort, which beats a network's fixed cost of about 7 ns there. At 512 the quicksort that 0.2.1 ran lost to `sort_unstable` on fresh inputs, although it won the single-input benchmark (1.46x above).
 
 ### sort_by_key
 

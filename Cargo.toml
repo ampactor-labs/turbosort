@@ -1,6 +1,6 @@
 [package]
 name = "turbosort"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 authors = ["Morgan Espitia"]
 description = "Radix sort for primitive types, with SIMD sorting networks for short slices"
