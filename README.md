@@ -5,9 +5,9 @@
 [![Documentation](https://docs.rs/turbosort/badge.svg)](https://docs.rs/turbosort)
 [![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/turbosort.svg)](#license)
 
-A Rust crate that sorts slices of primitive numbers, switching to radix sort (which orders keys one digit at a time) above 512 elements. Short slices of 32-bit types go through sorting networks, fixed compare-and-swap sequences run with SIMD instructions that handle several values at once (AVX2 on x86, NEON on ARM). On an Intel i7-8665U, release 0.2.1 sorted random 32-bit integers 2.2 to 3.2 times as fast as the standard library's unstable sort, from 1M to 100M keys. Random 64-bit keys are its weak spot: on a cloud VM the current code beats the standard library on them at 128 and 4K keys and loses at 1M. `sort_by_key` sorts any type by a key of one of those number types, stably.
+A Rust crate that sorts slices of primitive numbers, switching to radix sort (which orders keys one digit at a time) above 512 elements. Short slices of 32-bit types go through sorting networks, fixed compare-and-swap sequences run with SIMD instructions that handle several values at once (AVX2 on x86, NEON on ARM). On an Intel i7-8665U, release 0.2.1 sorted random 32-bit integers 2.2 to 3.2 times as fast as the standard library's unstable sort, from 1M to 100M keys. Random 64-bit keys are its weak spot: on a cloud VM, 0.2.2 beats the standard library on them at 128 and 4K keys and loses at 1M. `sort_by_key` sorts any type by a key of one of those number types, stably.
 
-**Status: working.** Version 0.2.1 is on crates.io, `master` carries unreleased changes ([CHANGELOG](CHANGELOG.md)), and the API can still change before 1.0; x86 CPUs without AVX2 run scalar code, because the planned SSE4.2 path is not written.
+**Status: working.** Version 0.2.2 is on crates.io ([CHANGELOG](CHANGELOG.md)), and the API can still change before 1.0; x86 CPUs without AVX2 run scalar code, because the planned SSE4.2 path is not written.
 
 Package: https://crates.io/crates/turbosort · Docs: https://docs.rs/turbosort
 
@@ -168,9 +168,9 @@ A second machine did not reproduce the large-array margins. On a shared cloud VM
 
 ### Since 0.2.1
 
-The unreleased changes on `master` have not been measured on the laptop. On a cloud VM (a KVM guest with 4 vCPUs of an Intel Xeon at 2.1 GHz, Rust 1.97.0), criterion runs of the same benchmark file before the changes (commit 0ccf74e, with the new `patterns` group copied in) and after gave these speeds relative to `sort_unstable`, each from one run at 20 samples per point:
+The changes in 0.2.2 have not been measured on the laptop. On a cloud VM (a KVM guest with 4 vCPUs of an Intel Xeon at 2.1 GHz, Rust 1.97.0), criterion runs of the same benchmark file before the changes (commit 0ccf74e, with the new `patterns` group copied in) and after gave these speeds relative to `sort_unstable`, each from one run at 20 samples per point:
 
-| Input | Size | 0.2.1 | now |
+| Input | Size | 0.2.1 | 0.2.2 |
 | --- | --- | --- | --- |
 | `u32`, sorted | 512 | 0.05x | 2.98x |
 | `u32`, reversed | 512 | 0.05x | 1.91x |
@@ -190,7 +190,7 @@ The 17 to 512 rows changed because the two quicksorts are gone, the reversed row
 
 Those benchmarks sort one input over and over, which lets the branch predictor learn insertion sort's and quicksort's comparisons at small sizes. Sorting 16,384 random `u32` cut into slices, so that every slice is new (the `small_batches` group), gave these speeds relative to `sort_unstable` on the same slices:
 
-| Slice length | 0.2.1 | now | now, per slice |
+| Slice length | 0.2.1 | 0.2.2 | 0.2.2, per slice |
 | --- | --- | --- | --- |
 | 4 | 0.36x | 1.49x | 7.8 ns |
 | 8 | 1.82x | 7.55x | 6.8 ns |
@@ -232,7 +232,7 @@ Miri reports AVX2 as unavailable, so the AVX2 code never runs under it, and the 
 
 ## Limitations
 
-The published speedups were measured on one laptop chip, an Intel i7-8665U, for release 0.2.1, and a second machine did not reproduce them for large arrays. Random 64-bit keys are the weak spot. In 0.2.1 they ran at 0.84x of the standard library's speed at 128 elements, 0.71x at 4K and 0.77x at 1M on the laptop, and voracious, another Rust radix sort, beat turbosort at all three sizes; on a shared cloud VM, 1M of them ran at 0.30x to 0.32x. The current code, on another cloud VM, reaches 1.07x at 128 and 1.18x at 4K but 0.90x at 1M. For large arrays of random 64-bit keys, measure voracious and the standard library against it.
+The published speedups were measured on one laptop chip, an Intel i7-8665U, for release 0.2.1, and a second machine did not reproduce them for large arrays. Random 64-bit keys are the weak spot. In 0.2.1 they ran at 0.84x of the standard library's speed at 128 elements, 0.71x at 4K and 0.77x at 1M on the laptop, and voracious, another Rust radix sort, beat turbosort at all three sizes; on a shared cloud VM, 1M of them ran at 0.30x to 0.32x. Release 0.2.2, on another cloud VM, reaches 1.07x at 128 and 1.18x at 4K but 0.90x at 1M. For large arrays of random 64-bit keys, measure voracious and the standard library against it.
 
 - x86 CPUs without AVX2 get `core`'s `sort_unstable` below 513 elements, because the planned SSE4.2 path is not written. Above 512 elements every CPU runs the same scalar radix sort.
 - AVX2 detection needs the `std` feature. A `no_std` build on x86_64 uses AVX2 only when it is compiled with AVX2 enabled (`-C target-feature=+avx2`, or a `target-cpu` that has it), which makes the binary require it.
