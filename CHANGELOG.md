@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- `SortByKeyBuffer::order` and `SortByKeyBuffer::apply_order`, for data kept
+  in parallel slices (issue #2). After `sort_by_key_with_buffer`, `order()`
+  gives each sorted element's original position, and `apply_order` moves
+  another slice of the same length into that order through a scratch `Vec`
+  the caller keeps, so it allocates nothing once that has grown. Elements
+  need not be `Copy`. Recording the order costs 4 bytes per element in the
+  buffer and no measurable time on the VM.
+
 ## [0.2.2] - 2026-10-26
 
 ### Fixed
@@ -197,6 +208,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - AVX2 sorting networks for tiny inputs, quicksort + SIMD leaf for mid-range
   arrays, and LSD radix for large arrays.
 
+[Unreleased]: https://github.com/ampactor-labs/turbosort/compare/v0.2.2...HEAD
 [0.2.2]: https://github.com/ampactor-labs/turbosort/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/ampactor-labs/turbosort/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/ampactor-labs/turbosort/compare/v0.1.1...v0.2.0
