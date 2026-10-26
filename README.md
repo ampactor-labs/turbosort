@@ -138,6 +138,8 @@ On x86_64 the crate detects AVX2 at runtime through CPUID when the `std` feature
 cd compare && cargo run --release
 ```
 
+[`scripts/bench-machine.sh`](scripts/bench-machine.sh) runs everything on a fresh Ubuntu server: it installs Rust and Highway, records the CPU, runs the benchmark groups three times, the comparison, a `sort_parallel` thread sweep and, where the machine exposes hardware counters, a `perf` profile, and prints the tables.
+
 On a KVM guest with 4 vCPUs of an Intel Xeon at 2.80 GHz (AVX2 and AVX-512, 1 MiB of L2 per core, 33 MiB of L3), Rust 1.97.0, the code on `main` gave these figures for random `u32`, in nanoseconds per key:
 
 | Length | std | turbosort | voracious | vqsort | turbosort vs std | turbosort vs vqsort |

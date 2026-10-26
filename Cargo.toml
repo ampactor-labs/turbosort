@@ -12,7 +12,7 @@ documentation = "https://docs.rs/turbosort"
 keywords = ["sort", "radix", "simd", "avx2", "performance"]
 categories = ["algorithms", "no-std"]
 rust-version = "1.75"
-exclude = ["CLAUDE.md", ".claude/", ".github/", "docs/"]
+exclude = ["CLAUDE.md", ".claude/", ".github/", "docs/", "scripts/"]
 
 # Release codegen plus debug info, for perf/flamegraph runs (see examples/profile.rs).
 [profile.profiling]
