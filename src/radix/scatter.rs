@@ -50,20 +50,29 @@ struct Lines([[u8; LINE]; 256]);
 /// buffer and writes them to `dst` a whole line at a time (software write
 /// combining).
 ///
-/// When every bucket holds nearly the same number of keys (a permutation of
-/// 0..n, for one), the plain scatter's 256 write positions sit at the same
-/// offsets within their pages, contend for a few cache sets and miss on
-/// almost every write. Here every element is written to one of 256 lines
-/// that stay in L1, and `dst` receives full lines, aligned to its own cache
-/// lines. On inputs without that shape the staging is pure overhead, so
-/// callers choose this only for passes [`wants_combining`] picks.
+/// Every element is written to one of 256 lines that stay in L1, and `dst`
+/// receives full lines, aligned to its own cache lines. Two shapes call for
+/// it ([`wants_combining`] and [`streams`] choose):
 ///
-/// Kept out of line so its 16 KiB of staging lines only take stack space in
-/// the passes that use them.
+/// - When every bucket holds nearly the same number of keys (a permutation
+///   of 0..n, for one), the plain scatter's 256 write positions sit at the
+///   same offsets within their pages, contend for a few cache sets and miss
+///   on almost every write.
+/// - When `dst` is larger than the caches, each line the plain scatter
+///   touches is first read from memory and only then overwritten, about one
+///   memory round trip per 64 bytes. With `stream` set, full lines go out
+///   as non-temporal stores, which write memory without reading it first
+///   and keep the destination out of the caches. On the 4-vCPU Xeon VM one
+///   out-of-cache pass over 1M random `u32` went from 5.3-6.3 ns to 2.2-2.6
+///   ns per key; inside the caches the plain scatter stayed faster.
+///
+/// On other inputs the staging is overhead. Kept out of line so its 16 KiB of
+/// staging lines only take stack space in the passes that use them.
 ///
 /// # Safety
 ///
-/// Same contract as [`scatter_pass`]; `offsets` is read, not advanced.
+/// Same contract as [`scatter_pass`]; `offsets` is read, not advanced. `dst`
+/// must be aligned for `T`, as any pointer to `T` must.
 #[inline(never)]
 pub unsafe fn scatter_pass_combined<T: SortableKey>(
     src: *const T,
@@ -71,6 +80,7 @@ pub unsafe fn scatter_pass_combined<T: SortableKey>(
     len: usize,
     offsets: &[usize; 256],
     pass: usize,
+    stream: bool,
 ) {
     let size = core::mem::size_of::<T>();
     debug_assert!(size.is_power_of_two() && size <= LINE);
@@ -106,16 +116,28 @@ pub unsafe fn scatter_pass_combined<T: SortableKey>(
         // The line is full: slots first..per_line hold the bucket's next
         // keys, which belong at dst[base + first..base + per_line].
         let start = first[d] as usize;
-        core::ptr::copy_nonoverlapping(
-            lines.add(d * per_line + start),
-            dst.add(base[d].wrapping_add(start)),
-            per_line - start,
-        );
+        if stream && start == 0 {
+            // A whole destination line: dst[base] starts a cache line (see
+            // `lead` above), and so does the staging line.
+            stream_line(
+                lines.add(d * per_line) as *const u8,
+                dst.add(base[d]) as *mut u8,
+            );
+        } else {
+            core::ptr::copy_nonoverlapping(
+                lines.add(d * per_line + start),
+                dst.add(base[d].wrapping_add(start)),
+                per_line - start,
+            );
+        }
         base[d] = base[d].wrapping_add(per_line);
         fill[d] = 0;
         first[d] = 0;
     }
 
+    if stream {
+        stream_fence();
+    }
     for d in 0..256 {
         let (start, end) = (first[d] as usize, fill[d] as usize);
         if end > start {
@@ -126,6 +148,53 @@ pub unsafe fn scatter_pass_combined<T: SortableKey>(
             );
         }
     }
+}
+
+/// Write the 64-byte line at `src` to `dst` with non-temporal stores. Both
+/// must be 64-byte aligned. Elsewhere than x86_64 it is a plain copy, and so
+/// under Miri, which cannot run the stores; the alignment is checked there.
+#[inline(always)]
+unsafe fn stream_line(src: *const u8, dst: *mut u8) {
+    debug_assert!(src as usize % LINE == 0 && dst as usize % LINE == 0);
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    {
+        use core::arch::x86_64::{__m128i, _mm_load_si128, _mm_stream_si128};
+        // SSE2 is part of the x86_64 baseline.
+        let (s, d) = (src as *const __m128i, dst as *mut __m128i);
+        _mm_stream_si128(d, _mm_load_si128(s));
+        _mm_stream_si128(d.add(1), _mm_load_si128(s.add(1)));
+        _mm_stream_si128(d.add(2), _mm_load_si128(s.add(2)));
+        _mm_stream_si128(d.add(3), _mm_load_si128(s.add(3)));
+    }
+    #[cfg(any(not(target_arch = "x86_64"), miri))]
+    core::ptr::copy_nonoverlapping(src, dst, LINE);
+}
+
+/// Order the non-temporal stores before anything that follows, as their
+/// weak ordering requires. Miri cannot run the fence and, interpreting one
+/// thread, has nothing for it to order, so it skips it.
+#[inline(always)]
+fn stream_fence() {
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    // SAFETY: SSE is part of the x86_64 baseline.
+    unsafe {
+        core::arch::x86_64::_mm_sfence()
+    };
+}
+
+/// Destinations of at least this many bytes take the streaming scatter on
+/// x86_64. Below it the destination fits in the caches, where non-temporal
+/// stores only lose: at 1 MiB the two tied on the VM, at 4 MiB streaming
+/// was twice as fast.
+const STREAM_MIN_BYTES: usize = 2 << 20;
+
+/// Whether a scatter of `len` elements of `T` should use
+/// [`scatter_pass_combined`] with non-temporal stores. Only x86_64 has them
+/// here; elsewhere combining without them measured slower than the plain
+/// scatter, so the answer is no.
+pub fn streams<T>(len: usize) -> bool {
+    cfg!(target_arch = "x86_64")
+        && len.saturating_mul(core::mem::size_of::<T>()) >= STREAM_MIN_BYTES
 }
 
 /// Inputs below this length scatter plainly: their buckets are too short for
@@ -206,13 +275,19 @@ mod tests {
             expected.set_len(src.len());
         }
 
-        let mut out: Vec<T> = Vec::with_capacity(src.len() + skew);
-        unsafe {
-            let dst = out.as_mut_ptr().add(skew);
-            scatter_pass_combined(src.as_ptr(), dst, src.len(), &offsets, pass);
-            out.set_len(src.len() + skew);
+        for stream in [false, true] {
+            let mut out: Vec<T> = Vec::with_capacity(src.len() + skew);
+            unsafe {
+                let dst = out.as_mut_ptr().add(skew);
+                scatter_pass_combined(src.as_ptr(), dst, src.len(), &offsets, pass, stream);
+                out.set_len(src.len() + skew);
+            }
+            assert_eq!(
+                &out[skew..],
+                &expected[..],
+                "pass {pass}, skew {skew}, stream {stream}"
+            );
         }
-        assert_eq!(&out[skew..], &expected[..], "pass {pass}, skew {skew}");
     }
 
     fn xorshift(state: &mut u64) -> u64 {

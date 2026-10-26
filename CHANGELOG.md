@@ -6,7 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- On x86_64, radix passes over arrays of 2 MiB or more stage keys in
+  cache-line buffers and write each full line with non-temporal stores.
+  The plain scatter read every destination line from memory before
+  overwriting it. On a 4-vCPU Xeon VM, 1M random `u32` went from 1.07x to
+  1.41x `sort_unstable`, 10M from 1.01x to 1.92x, 1M `i32` from 0.88x to
+  1.96x and 1M `u64` from 0.64x to 1.02x. 8-byte keys of that size take
+  byte digits instead of the 11-bit path, whose 2,048 buckets are too many
+  to stage. Smaller arrays and other architectures are unchanged.
+
 ### Added
+- `compare/`, a separate program that times turbosort against
+  `sort_unstable`, voracious and Google Highway's vqsort on the same random
+  data. It needs a C++ compiler and Highway's library, so it is not part of
+  the crate or CI. On the VM, vqsort (AVX-512) beat turbosort from 128
+  elements up.
 - `SortByKeyBuffer::order` and `SortByKeyBuffer::apply_order`, for data kept
   in parallel slices (issue #2). After `sort_by_key_with_buffer`, `order()`
   gives each sorted element's original position, and `apply_order` moves

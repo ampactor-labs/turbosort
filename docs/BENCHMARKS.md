@@ -1,6 +1,6 @@
 # Benchmarks and profiling
 
-This file holds the detail behind the Benchmarks section of the [README](../README.md): the profile of the 0.2.1 release on an Intel i7-8665U, a check on a second machine, and before-and-after runs for the changes since 0.2.1. The 0.2.1 criterion tables are in the README.
+This file holds the detail behind the Benchmarks section of the [README](../README.md): the profile of the 0.2.1 release on an Intel i7-8665U, a check on a second machine, and before-and-after runs for the changes since 0.2.1, the streaming change after 0.2.2, and a comparison with vqsort. The 0.2.1 criterion tables are in the README.
 
 ## Profiling
 
@@ -191,3 +191,86 @@ cargo bench --bench sort_bench -- '^by_key/' --sample-size 10 --warm-up-time 1 -
 
 An earlier run of the allocating version measured 1.84x, 2.97x and 1.32x for `u32` and 1.28x, 2.01x and 0.95x for `u64`, so differences of 10 to 20% between runs are noise; the gap at a million records is not. There, timing each phase in a scratch harness put 75% (`u64`) to 85% (`u32`) of the time in the radix passes over the entries and in moving the records into their new order, which write 48 to 64 MB of freshly allocated memory per call; the buffered version writes into memory it has already touched. The same harness, sorting batches of distinct record arrays, measured `u32` keys at 2.1x at a million, and found the losses the README lists: few distinct keys (0.6x for `u64` at a million), and input already sorted (0.7x) or reversed (0.5x), where the standard library finishes in one pass over the records.
 
+## Streaming large passes
+
+These runs were made on 2026-10-26 on a shared cloud VM: a KVM guest with 4 vCPUs of an Intel Xeon at 2.80 GHz (AVX2 and AVX-512), 1 MiB of L2 per core and 33 MiB of L3, with transparent huge pages only on request, using Rust 1.97.0. Release 0.2.2 and the streaming change ran the README's benchmark groups alternately, twice each, at 30 samples per point; each figure is the median of the two runs, and `sort_unstable` the median of all four.
+
+```sh
+cargo bench --bench sort_bench --features parallel -- '^(turbosort|parallel)/' --sample-size 30
+```
+
+On this machine one radix pass over 1M random `u32` cost 5.3 to 6.3 ns per key with the plain scatter against 1.1 ns inside the caches: each destination line was read from memory before being overwritten, about one memory round trip per 64 bytes, without overlap. Spacing the 256 bucket starts apart did not help, so the cause was not cache-set aliasing, and neither did transparent huge pages where the VM granted them. Staging the keys in cache lines and writing each full line with non-temporal stores brought the pass to 2.2 to 2.6 ns per key. A one-byte MSD split before in-cache LSD passes, also tried, gained less (1M `u32` at 13 ns per key against 10).
+
+| Type | Size | `sort_unstable` | 0.2.2 | Streaming | 0.2.2 vs `sort_unstable` | Streaming vs `sort_unstable` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `f32` | 128 | 1.23 µs | 264 ns | 281 ns | 4.65x | 4.37x |
+| `f32` | 4,096 | 61.2 µs | 37 µs | 42.3 µs | 1.65x | 1.45x |
+| `f32` | 1,000,000 | 28.7 ms | 21 ms | 13.4 ms | 1.37x | 2.14x |
+| `i32` | 128 | 816 ns | 292 ns | 262 ns | 2.80x | 3.12x |
+| `i32` | 4,096 | 40 µs | 26.5 µs | 23.6 µs | 1.51x | 1.69x |
+| `i32` | 1,000,000 | 20.7 ms | 23.4 ms | 10.6 ms | 0.88x | 1.96x |
+| `u32` | 16 | 52.5 ns | 21.5 ns | 17.5 ns | 2.44x | 3.00x |
+| `u32` | 128 | 754 ns | 260 ns | 252 ns | 2.89x | 2.99x |
+| `u32` | 512 | 3.83 µs | 2.05 µs | 1.85 µs | 1.87x | 2.07x |
+| `u32` | 4,096 | 40.8 µs | 26.3 µs | 27.3 µs | 1.56x | 1.50x |
+| `u32` | 65,536 | 1.07 ms | 426 µs | 439 µs | 2.52x | 2.45x |
+| `u32` | 1,000,000 | 20.1 ms | 18.7 ms | 14.3 ms | 1.07x | 1.41x |
+| `u32` | 10,000,000 | 253 ms | 251 ms | 132 ms | 1.01x | 1.92x |
+| `u64` | 128 | 712 ns | 766 ns | 816 ns | 0.93x | 0.87x |
+| `u64` | 4,096 | 41.9 µs | 34.9 µs | 37.2 µs | 1.20x | 1.13x |
+| `u64` | 1,000,000 | 22.6 ms | 35.1 ms | 22.3 ms | 0.64x | 1.02x |
+
+Below 2 MiB nothing changed, so those rows show the run-to-run noise. `sort_parallel` has its own scatter and does not stream yet; the serial sort it is compared with does:
+
+| Size | Serial 0.2.2 | Serial, streaming | `sort_parallel` 0.2.2 | `sort_parallel`, unchanged code |
+| --- | --- | --- | --- | --- |
+| 1,000,000 | 23.1 ms | 11.9 ms | 8.31 ms | 7.78 ms |
+| 10,000,000 | 292 ms | 134 ms | 108 ms | 97.3 ms |
+
+## Against vqsort
+
+The same VM, with [`compare/`](../compare): about 4M random keys per length cut into slices of that length, nanoseconds per key, the best of nine rounds with the median in parentheses. vqsort is Google Highway's vectorized quicksort (Highway 1.0.7 from Ubuntu 24.04, through `vqsort-rs` 0.3.0), which uses AVX-512 on this CPU; turbosort is the streaming code.
+
+```sh
+sudo apt install libhwy-dev
+cd compare && cargo run --release
+```
+
+#### `u32`: ns per key, best of 9 (median)
+
+| Length | std | turbosort | voracious | vqsort | turbosort vs std | turbosort vs vqsort |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 | 7.63 (7.84) | 0.93 (0.97) | 8.20 (9.06) | 1.72 (1.81) | 8.18x | 1.85x |
+| 16 | 10.15 (10.33) | 1.41 (1.51) | 10.59 (12.09) | 1.34 (1.46) | 7.20x | 0.95x |
+| 128 | 8.49 (9.19) | 1.93 (2.08) | 8.46 (9.53) | 0.97 (1.02) | 4.40x | 0.50x |
+| 512 | 13.13 (16.83) | 3.81 (4.20) | 10.01 (10.61) | 2.35 (2.61) | 3.45x | 0.62x |
+| 4096 | 12.20 (13.17) | 5.09 (5.30) | 6.67 (7.04) | 3.10 (3.29) | 2.40x | 0.61x |
+| 65536 | 14.49 (15.70) | 6.01 (6.41) | 6.92 (6.96) | 3.18 (3.27) | 2.41x | 0.53x |
+| 1000000 | 17.78 (18.65) | 10.02 (12.81) | 24.08 (26.30) | 4.15 (4.56) | 1.77x | 0.41x |
+| 10000000 | 21.49 (22.47) | 12.12 (13.58) | 25.75 (27.84) | 4.96 (5.10) | 1.77x | 0.41x |
+
+#### `u64`: ns per key, best of 9 (median)
+
+| Length | std | turbosort | voracious | vqsort | turbosort vs std | turbosort vs vqsort |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 | 7.74 (7.75) | 8.08 (8.27) | 8.33 (8.45) | 2.33 (2.45) | 0.96x | 0.29x |
+| 16 | 10.34 (10.39) | 10.62 (10.71) | 10.36 (10.53) | 1.90 (2.08) | 0.97x | 0.18x |
+| 128 | 8.51 (9.10) | 9.14 (9.84) | 9.45 (10.28) | 2.05 (2.12) | 0.93x | 0.22x |
+| 512 | 10.35 (10.73) | 10.44 (10.92) | 11.86 (13.02) | 4.90 (5.11) | 0.99x | 0.47x |
+| 4096 | 12.83 (13.71) | 7.83 (8.22) | 8.37 (8.99) | 5.81 (8.04) | 1.64x | 0.74x |
+| 65536 | 15.88 (17.88) | 11.22 (13.13) | 9.99 (10.72) | 7.40 (7.68) | 1.42x | 0.66x |
+| 1000000 | 19.95 (21.16) | 20.20 (25.93) | 29.62 (31.74) | 9.02 (10.07) | 0.99x | 0.45x |
+| 10000000 | 26.03 (30.58) | 23.60 (27.27) | 32.66 (34.46) | 10.92 (11.44) | 1.10x | 0.46x |
+
+#### `f32`: ns per key, best of 9 (median)
+
+| Length | std | turbosort | voracious | vqsort | turbosort vs std | turbosort vs vqsort |
+| --- | --- | --- | --- | --- | --- | --- |
+| 8 | 9.62 (10.34) | 1.04 (1.08) | 10.31 (10.79) | 3.39 (3.76) | 9.26x | 3.26x |
+| 16 | 11.78 (12.68) | 1.17 (1.28) | 13.21 (13.56) | 3.03 (3.08) | 10.09x | 2.60x |
+| 128 | 17.44 (18.69) | 2.05 (2.10) | 11.60 (12.15) | 1.12 (1.16) | 8.52x | 0.55x |
+| 512 | 18.89 (20.72) | 3.99 (4.30) | 15.38 (16.58) | 2.47 (2.73) | 4.74x | 0.62x |
+| 4096 | 22.22 (23.14) | 7.60 (7.85) | 9.31 (11.50) | 3.08 (3.35) | 2.92x | 0.41x |
+| 65536 | 25.10 (30.13) | 7.96 (9.73) | 8.94 (9.32) | 3.81 (3.95) | 3.15x | 0.48x |
+| 1000000 | 29.63 (36.91) | 13.62 (14.25) | 20.86 (21.90) | 4.81 (5.17) | 2.18x | 0.35x |
+| 10000000 | 36.07 (39.80) | 16.30 (18.22) | 12.99 (17.83) | 6.32 (7.66) | 2.21x | 0.39x |

@@ -13,7 +13,9 @@
 //!   shares the same digit are skipped.
 //! - Eight-byte keys on large inputs switch to wider digits
 //!   ([`sort_core_wide`]): fewer, more expensive passes. The width is chosen
-//!   from benchmarks (see `WIDE_BINS`).
+//!   from benchmarks (see `WIDE_BINS`). On x86_64, arrays too big for the
+//!   caches stay on byte digits instead and write each pass's output with
+//!   non-temporal stores ([`scatter::streams`]).
 //! - Both cores divert ([`divert`]): when the top digits alone carry enough
 //!   bits to nearly order the keys, the low-digit passes are replaced by one
 //!   scan that sorts the short runs left over.
@@ -181,7 +183,11 @@ unsafe fn sort_raw<T: SortableKey, const WIDE: bool>(slice: &mut [T], scratch: *
         4 => sort_core_bytes::<T, 4>(slice, scratch),
         8 => {
             #[cfg(feature = "alloc")]
-            if WIDE && slice.len() >= WIDE_MIN {
+            // Arrays big enough to stream take byte digits instead: the
+            // wide path's 2,048 buckets are too many to stage in cache
+            // lines, and streamed byte passes measured faster (1M random
+            // u64 at 16.9 ns per key against 31.6 on the VM).
+            if WIDE && slice.len() >= WIDE_MIN && !scatter::streams::<T>(slice.len()) {
                 sort_core_wide::<T, WIDE_BINS, WIDE_PASSES>(slice, scratch);
                 return;
             }
@@ -247,8 +253,9 @@ unsafe fn sort_core_bytes<T: SortableKey, const PASSES: usize>(slice: &mut [T], 
         };
         // SAFETY: offsets is the exclusive prefix sum of this pass's histogram
         // of src[..len]; src/dst validity comes from the sort_raw contract.
-        if scatter::wants_combining(&hist[pass], len) {
-            scatter::scatter_pass_combined(src, dst, len, &offsets, pass);
+        let stream = scatter::streams::<T>(len);
+        if stream || scatter::wants_combining(&hist[pass], len) {
+            scatter::scatter_pass_combined(src, dst, len, &offsets, pass, stream);
         } else {
             scatter::scatter_pass(src, dst, len, &mut offsets, pass);
         }
@@ -430,6 +437,76 @@ mod tests {
         unsafe { sort_core_bytes::<u64, 8>(&mut data, scratch.as_mut_ptr()) };
         assert_eq!(data, expected);
     }
+
+    /// Sort `data` through `sort` and `sort_with_buffer`, both of which
+    /// stream at this size on x86_64, and check against the standard sort.
+    fn check_streaming<T: SortableKey + core::fmt::Debug>(data: Vec<T>) {
+        assert!(cfg!(not(target_arch = "x86_64")) || scatter::streams::<T>(data.len()));
+        // Compare keys, which are bit patterns: NaN != NaN as floats.
+        let keys = |v: &[T]| v.iter().map(|x| x.to_radix_key()).collect::<Vec<_>>();
+        let mut expected = keys(&data);
+        expected.sort_unstable();
+        let mut sorted = data.clone();
+        sort(&mut sorted);
+        assert!(keys(&sorted) == expected, "sort, len={}", data.len());
+        let mut sorted = data;
+        let mut buffer = sorted.clone();
+        sort_with_buffer(&mut sorted, &mut buffer);
+        assert!(
+            keys(&sorted) == expected,
+            "sort_with_buffer, len={}",
+            sorted.len()
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // millions of keys; the scatter tests cover streaming under Miri
+    fn streaming_passes_sort_every_width() {
+        // Just above the streaming threshold for each width: random keys,
+        // few distinct values (most buckets empty, so partial lines dominate),
+        // and small values in wide types (constant top digits).
+        let mut state = 0x6A09_E667_F3BC_C908u64;
+        let elems = |size: usize| (STREAM_TEST_BYTES / size) + 77;
+        check_streaming(
+            (0..elems(2))
+                .map(|_| xorshift(&mut state) as u16)
+                .collect::<Vec<_>>(),
+        );
+        check_streaming(
+            (0..elems(4))
+                .map(|_| xorshift(&mut state) as u32)
+                .collect::<Vec<_>>(),
+        );
+        check_streaming(
+            (0..elems(4))
+                .map(|_| (xorshift(&mut state) % 3) as i32 - 1)
+                .collect::<Vec<_>>(),
+        );
+        check_streaming(
+            (0..elems(4))
+                .map(|_| f32::from_bits(xorshift(&mut state) as u32))
+                .collect::<Vec<_>>(),
+        );
+        check_streaming(
+            (0..elems(8))
+                .map(|_| xorshift(&mut state))
+                .collect::<Vec<_>>(),
+        );
+        check_streaming(
+            (0..elems(8))
+                .map(|_| xorshift(&mut state) as i64 >> 40)
+                .collect::<Vec<_>>(),
+        );
+        check_streaming((0..elems(8)).map(|i| (i % 1000) as u64).collect::<Vec<_>>());
+        check_streaming(
+            (0..elems(8))
+                .map(|_| f64::from_bits(xorshift(&mut state)))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// Matches `scatter::STREAM_MIN_BYTES`.
+    const STREAM_TEST_BYTES: usize = 2 << 20;
 }
 
 /// Wide-digit LSD passes with heap histograms; fewer passes over the data.
