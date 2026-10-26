@@ -1,0 +1,18 @@
+[package]
+name = "turbosort-compare"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "turbosort against std, voracious and Google Highway's vqsort on fresh random data"
+
+# A separate package, not part of the crate or its CI: vqsort needs a C++
+# compiler and Highway's library (Debian/Ubuntu: `apt install libhwy-dev`).
+[dependencies]
+turbosort = { path = ".." }
+vqsort-rs = "0.3"
+voracious_radix_sort = "1.2"
+rand = "0.8"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"

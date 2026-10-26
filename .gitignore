@@ -8,3 +8,5 @@
 CLAUDE.md
 .env.*
 !.env.example
+/compare/target
+/compare/Cargo.lock
