@@ -9,6 +9,8 @@
 //! then moved into the sorted order through a buffer, as bitwise moves, so
 //! they need not be `Copy` or `Clone`. All of that memory lives in a
 //! [`SortByKeyBuffer`], which a caller that sorts often keeps between calls.
+//! The buffer also keeps the order of its last sort, the source position of
+//! each element, so other slices can be put in the same order.
 
 extern crate alloc;
 
@@ -37,13 +39,22 @@ struct Entry<K> {
 
 /// Reusable memory for [`sort_by_key_with_buffer`](crate::sort_by_key_with_buffer).
 ///
-/// It holds two arrays of a key and a 4-byte position per element and room
-/// for the elements themselves, and grows to the longest slice it has
-/// sorted. Kept between calls, it makes repeated sorts allocation-free. It
-/// never holds elements between calls: dropping it drops none.
+/// It holds two arrays of a key and a 4-byte position per element, the order
+/// of the last sort (4 bytes per element) and room for the elements
+/// themselves, and grows to the longest slice it has sorted. Kept between
+/// calls, it makes repeated sorts allocation-free. It never holds elements
+/// between calls: dropping it drops none.
+///
+/// After a sort, [`order`](Self::order) tells where each element came from,
+/// and [`apply_order`](Self::apply_order) puts another slice in the same
+/// order, for data kept in parallel slices.
 pub struct SortByKeyBuffer<T, K: SortableKey> {
     entries: Vec<Entry<K::Key>>,
     scratch: Vec<Entry<K::Key>>,
+    // A permutation of 0..order.len() whenever a method can see it: each
+    // sort replaces it with another only after its key calls have returned.
+    // `apply_order` relies on that for its bitwise moves.
+    order: Vec<u32>,
     // Always length 0; only its capacity is used.
     moved: Vec<T>,
 }
@@ -54,6 +65,7 @@ impl<T, K: SortableKey> SortByKeyBuffer<T, K> {
         SortByKeyBuffer {
             entries: Vec::new(),
             scratch: Vec::new(),
+            order: Vec::new(),
             moved: Vec::new(),
         }
     }
@@ -63,6 +75,7 @@ impl<T, K: SortableKey> SortByKeyBuffer<T, K> {
         SortByKeyBuffer {
             entries: Vec::with_capacity(len),
             scratch: Vec::with_capacity(len),
+            order: Vec::with_capacity(len),
             moved: Vec::with_capacity(len),
         }
     }
@@ -72,7 +85,62 @@ impl<T, K: SortableKey> SortByKeyBuffer<T, K> {
         self.entries
             .capacity()
             .min(self.scratch.capacity())
+            .min(self.order.capacity())
             .min(self.moved.capacity())
+    }
+
+    /// The order of the last sort through this buffer: after it, position
+    /// `i` of the sorted slice holds the element that was at `order()[i]`.
+    ///
+    /// Its length is that slice's length. It is empty before the first sort,
+    /// and after sorting a slice of more than `u32::MAX` elements, which the
+    /// standard library sorts instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut words = vec!["pear", "fig", "apple", "kiwi"];
+    /// let mut buffer = turbosort::SortByKeyBuffer::new();
+    /// turbosort::sort_by_key_with_buffer(&mut words, &mut buffer, |w| w.len() as u32);
+    /// assert_eq!(words, ["fig", "pear", "kiwi", "apple"]);
+    /// assert_eq!(buffer.order(), [1, 0, 3, 2]);
+    /// ```
+    pub fn order(&self) -> &[u32] {
+        &self.order
+    }
+
+    /// Put `other` in the order of the last sort through this buffer, so
+    /// that it stays parallel to the sorted slice: position `i` gets the
+    /// element that was at `order()[i]`.
+    ///
+    /// The elements are moved through `scratch`, which is cleared first and
+    /// left empty; keep it between calls and this allocates nothing once it
+    /// has grown. They need not be `Copy` or `Clone`.
+    ///
+    /// # Panics
+    ///
+    /// If `other` and the last sorted slice differ in length.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut ids = vec![30u32, 10, 20];
+    /// let mut names = vec![String::from("c"), String::from("a"), String::from("b")];
+    /// let mut buffer = turbosort::SortByKeyBuffer::new();
+    /// let mut scratch = Vec::new();
+    /// turbosort::sort_by_key_with_buffer(&mut ids, &mut buffer, |&id| id);
+    /// buffer.apply_order(&mut names, &mut scratch);
+    /// assert_eq!(ids, [10, 20, 30]);
+    /// assert_eq!(names, ["a", "b", "c"]);
+    /// ```
+    pub fn apply_order<U>(&self, other: &mut [U], scratch: &mut Vec<U>) {
+        assert_eq!(
+            other.len(),
+            self.order.len(),
+            "apply_order: the slice's length differs from the last sorted slice's"
+        );
+        scratch.clear();
+        move_into_order(other, &self.order, scratch);
     }
 }
 
@@ -113,10 +181,14 @@ pub fn sort_by_key_with_buffer<T, K, F>(
     F: FnMut(&T) -> K,
 {
     let len = slice.len();
+    let order = &mut buffer.order;
     if len < 2 {
+        order.clear();
+        order.extend(0..len as u32);
         return;
     }
     if len > u32::MAX as usize {
+        order.clear();
         slice.sort_by_key(|x| key(x).to_radix_key());
         return;
     }
@@ -127,7 +199,9 @@ pub fn sort_by_key_with_buffer<T, K, F>(
         pos,
     }));
 
+    order.clear();
     if entries.windows(2).all(|w| w[0].key <= w[1].key) {
+        order.extend(0..len as u32);
         return;
     }
     if entries.windows(2).all(|w| w[0].key >= w[1].key) {
@@ -135,11 +209,15 @@ pub fn sort_by_key_with_buffer<T, K, F>(
         // reversing each run of them again restores it. The run at
         // entries[start..i] lands at slice[len - i..len - start].
         slice.reverse();
+        order.resize(len, 0);
         let mut start = 0;
         for i in 1..=len {
             if i == len || entries[i].key != entries[start].key {
                 if i - start > 1 {
                     slice[len - i..len - start].reverse();
+                }
+                for (dst, pos) in order[len - i..len - start].iter_mut().zip(start as u32..) {
+                    *dst = pos;
                 }
                 start = i;
             }
@@ -152,7 +230,8 @@ pub fn sort_by_key_with_buffer<T, K, F>(
     } else {
         sort_entries(entries, &mut buffer.scratch);
     }
-    move_into_order(slice, &buffer.entries, &mut buffer.moved);
+    order.extend(buffer.entries.iter().map(|e| e.pos));
+    move_into_order(slice, order, &mut buffer.moved);
 }
 
 /// Sort a few `entries` stably by key: each one moves past the larger keys
@@ -231,23 +310,24 @@ fn sort_entries<K: UnsignedKey>(entries: &mut Vec<Entry<K>>, scratch: &mut Vec<E
 }
 
 /// Rearrange `slice` so that position `i` holds the element that was at
-/// `entries[i].pos`, through `moved`, which stays empty.
-fn move_into_order<T, K>(slice: &mut [T], entries: &[Entry<K>], moved: &mut Vec<T>) {
+/// `order[i]`, through `moved`, which stays empty. `order` must be a
+/// permutation of `0..slice.len()`.
+fn move_into_order<T>(slice: &mut [T], order: &[u32], moved: &mut Vec<T>) {
     let len = slice.len();
-    debug_assert_eq!(entries.len(), len);
+    assert_eq!(order.len(), len);
     debug_assert!(moved.is_empty());
     moved.reserve(len);
     let src = slice.as_mut_ptr();
     let dst = moved.as_mut_ptr();
-    // SAFETY: the positions are a permutation of 0..len (one entry was made
-    // per element, and sorting only permutes entries), so each element is
-    // read once into `moved`'s spare capacity, and copying it back leaves
-    // every element in `slice` exactly once. Nothing between the first read
-    // and the last write can panic. `moved` keeps length 0, so it never owns
-    // or drops an element.
+    // SAFETY: every caller passes a permutation of 0..len: the order a sort
+    // just built from one entry per element, or a buffer's stored order,
+    // which only sorts write. So each element is read once into `moved`'s
+    // spare capacity, and copying it back leaves every element in `slice`
+    // exactly once. Nothing between the first read and the last write can
+    // panic. `moved` keeps length 0, so it never owns or drops an element.
     unsafe {
-        for (i, e) in entries.iter().enumerate() {
-            core::ptr::copy_nonoverlapping(src.add(e.pos as usize), dst.add(i), 1);
+        for (i, &pos) in order.iter().enumerate() {
+            core::ptr::copy_nonoverlapping(src.add(pos as usize), dst.add(i), 1);
         }
         core::ptr::copy_nonoverlapping(dst, src, len);
     }
@@ -264,20 +344,25 @@ mod tests {
         *state
     }
 
-    /// Sort `(key, position)` pairs by key and check the result against the
-    /// standard library's stable sort.
+    /// Sort `(key, position)` pairs by key, with and without a buffer, and
+    /// check the results and the buffer's order against the standard
+    /// library's stable sort.
     fn check<K: SortableKey + core::fmt::Debug>(keys: Vec<K>) {
         let mut items: Vec<(K, usize)> = keys.into_iter().zip(0..).collect();
+        let mut buffered = items.clone();
         let mut expected = items.clone();
         expected.sort_by_key(|&(k, _)| k.to_radix_key());
-        sort_by_key(&mut items, |&(k, _)| k);
         let positions = |v: &[(K, usize)]| v.iter().map(|&(_, i)| i).collect::<Vec<_>>();
-        assert_eq!(
-            positions(&items),
-            positions(&expected),
-            "len={}",
-            items.len()
-        );
+        let len = items.len();
+
+        sort_by_key(&mut items, |&(k, _)| k);
+        assert_eq!(positions(&items), positions(&expected), "len={len}");
+
+        let mut buffer = SortByKeyBuffer::new();
+        sort_by_key_with_buffer(&mut buffered, &mut buffer, |&(k, _)| k);
+        assert_eq!(positions(&buffered), positions(&expected), "len={len}");
+        let order: Vec<usize> = buffer.order().iter().map(|&p| p as usize).collect();
+        assert_eq!(order, positions(&expected), "order, len={len}");
     }
 
     #[test]
@@ -427,9 +512,72 @@ mod tests {
                 expected.sort_by_key(|&(k, _)| k);
                 sort_by_key_with_buffer(&mut items, &mut buffer, |&(k, _)| k);
                 assert_eq!(items, expected, "len={len} case={case}");
+                let order: Vec<usize> = buffer.order().iter().map(|&p| p as usize).collect();
+                let positions: Vec<usize> = expected.iter().map(|&(_, i)| i).collect();
+                assert_eq!(order, positions, "order, len={len} case={case}");
             }
         }
         let longest = lens.iter().copied().max().unwrap();
         assert!(buffer.capacity() >= longest);
+    }
+
+    #[test]
+    fn order_starts_empty() {
+        let buffer: SortByKeyBuffer<u8, u32> = SortByKeyBuffer::new();
+        assert!(buffer.order().is_empty());
+        let mut empty: [alloc::string::String; 0] = [];
+        buffer.apply_order(&mut empty, &mut Vec::new());
+    }
+
+    #[test]
+    fn apply_order_keeps_parallel_slices_together() {
+        // Non-Copy companion slices, one scratch Vec reused across lengths
+        // and left holding elements before each call, through every path:
+        // short, ascending, descending with duplicates, insertion, radix.
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        let mut buffer = SortByKeyBuffer::new();
+        let mut scratch: Vec<alloc::string::String> = Vec::new();
+        let lens: &[usize] = if cfg!(miri) {
+            &[0, 1, 2, 40, 300, 7]
+        } else {
+            &[0, 1, 2, 40, 300, 5000, 7]
+        };
+        for &len in lens {
+            for case in 0..3 {
+                let mut keys: Vec<u32> = (0..len)
+                    .map(|i| match case {
+                        0 => (xorshift(&mut state) % 10) as u32,
+                        1 => i as u32 / 2,
+                        _ => (len - i) as u32 / 2,
+                    })
+                    .collect();
+                let mut names: Vec<alloc::string::String> =
+                    (0..len).map(|i| alloc::format!("{i}")).collect();
+                let mut weights: Vec<u64> = (0..len as u64).map(|i| i * 3).collect();
+                let mut expected: Vec<(u32, usize)> = keys.iter().copied().zip(0..).collect();
+                expected.sort_by_key(|&(k, _)| k);
+
+                scratch.push(alloc::string::String::from("left over"));
+                sort_by_key_with_buffer(&mut keys, &mut buffer, |&k| k);
+                buffer.apply_order(&mut names, &mut scratch);
+                buffer.apply_order(&mut weights, &mut Vec::new());
+
+                assert!(scratch.is_empty());
+                for (i, &(k, pos)) in expected.iter().enumerate() {
+                    assert_eq!(keys[i], k, "len={len} case={case}");
+                    assert_eq!(names[i], alloc::format!("{pos}"), "len={len} case={case}");
+                    assert_eq!(weights[i], pos as u64 * 3, "len={len} case={case}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "differs from the last sorted slice")]
+    fn apply_order_rejects_another_length() {
+        let mut buffer = SortByKeyBuffer::new();
+        let mut keys = [3u32, 1, 2];
+        sort_by_key_with_buffer(&mut keys, &mut buffer, |&k| k);
+        buffer.apply_order(&mut [1u8, 2], &mut Vec::new());
     }
 }

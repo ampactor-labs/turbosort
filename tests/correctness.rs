@@ -478,6 +478,24 @@ proptest! {
     }
 }
 
+/// Check that `buffer`'s order names each sorted item's original position,
+/// and that `apply_order` moves a parallel slice of those positions the same
+/// way.
+#[cfg(feature = "alloc")]
+fn check_order<K: turbosort::SortableKey>(
+    buffer: &turbosort::SortByKeyBuffer<(K, usize), K>,
+    expected: &[(K, usize)],
+) -> Result<(), TestCaseError> {
+    let positions: Vec<usize> = expected.iter().map(|&(_, i)| i).collect();
+    let order: Vec<usize> = buffer.order().iter().map(|&p| p as usize).collect();
+    prop_assert_eq!(&order, &positions);
+    let mut parallel: Vec<String> = (0..expected.len()).map(|i| i.to_string()).collect();
+    buffer.apply_order(&mut parallel, &mut Vec::new());
+    let want: Vec<String> = positions.iter().map(|i| i.to_string()).collect();
+    prop_assert_eq!(parallel, want);
+    Ok(())
+}
+
 // Stable sorting by a key: tuples keyed by one field, against the standard
 // library's stable sort, which must agree element for element.
 #[cfg(feature = "alloc")]
@@ -498,6 +516,7 @@ proptest! {
         let mut buffer = turbosort::SortByKeyBuffer::new();
         turbosort::sort_by_key_with_buffer(&mut buffered, &mut buffer, |&(k, _)| k);
         prop_assert_eq!(&buffered, &expected);
+        check_order(&buffer, &expected)?;
     }
 
     #[test]
@@ -520,6 +539,7 @@ proptest! {
         let mut buffer = turbosort::SortByKeyBuffer::new();
         turbosort::sort_by_key_with_buffer(&mut buffered, &mut buffer, |&(k, _)| k);
         prop_assert_eq!(&buffered, &expected);
+        check_order(&buffer, &expected)?;
     }
 
     #[test]

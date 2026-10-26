@@ -134,8 +134,9 @@ pub fn sort_with_buffer<T: SortableKey>(slice: &mut [T], buffer: &mut [T]) {
 /// `sort_by_key`, which calls `key` on every comparison.
 ///
 /// This allocates its buffers on every call: two arrays of 8 bytes per
-/// element (16 for 8-byte keys) and room for the elements. Code that sorts
-/// often should keep a [`SortByKeyBuffer`] and call
+/// element (16 for 8-byte keys), 4 bytes per element for the order and room
+/// for the elements. Code that sorts often, or that needs the order to
+/// rearrange other slices, should keep a [`SortByKeyBuffer`] and call
 /// [`sort_by_key_with_buffer`]. Requires the `alloc` feature.
 ///
 /// # Examples
@@ -165,6 +166,10 @@ where
 /// element; below 64 elements the keys are insertion-sorted instead of
 /// radix-sorted. Slices of more than `u32::MAX` elements fall back to the
 /// standard library's stable sort.
+///
+/// Afterwards [`SortByKeyBuffer::order`] gives each element's original
+/// position, and [`SortByKeyBuffer::apply_order`] puts another slice of the
+/// same length in the same order, for data kept in parallel slices.
 ///
 /// # Examples
 ///
